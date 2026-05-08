@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Virtualenvs
+venv/
+.venv/
+env/
+
+# Environment
+.env
+.env.local
+*.env
+
+# Docker
+.docker/
+
+# Airflow
+logs/
+airflow.db
+airflow.cfg
+webserver_config.py
+standalone_admin_password.txt
+
+# dbt
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+dbt/.user.yml
+
+# Data — el JSON crudo NO se versiona, se descarga en runtime
+data/raw/*.json
+data/raw/*.csv
+!data/raw/.gitkeep
+
+# PowerBI temp files
+*.pbix.tmp
+~$*.pbix
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Spark
+spark-warehouse/
+metastore_db/
+derby.log
+
+# Java
+*.class
