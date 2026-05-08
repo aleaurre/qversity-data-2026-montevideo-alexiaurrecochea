@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.6
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Imagen base: Airflow 2.10.5 sobre Python 3.11.
+# Usamos 2.10.x (no 2.7.3) porque la consigna pide "2.7+" y las imágenes más
+# recientes traen muchísimos menos CVEs en paquetes del SO base.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM apache/airflow:2.10.5-python3.11
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cambiamos a root SOLO para instalar paquetes APT y bajar el driver JDBC.
+# El contenedor en runtime NO corre como root — termina como `airflow` (UID 50000).
+# ─────────────────────────────────────────────────────────────────────────────
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        openjdk-17-jre-headless \
+        curl \
+        procps \
+    && apt-get autoremove -yqq --purge \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+# Driver JDBC de Postgres para PySpark.
+RUN mkdir -p /opt/spark/jars \
+    && curl -fsSL -o /opt/spark/jars/postgresql-42.7.3.jar \
+        https://jdbc.postgresql.org/download/postgresql-42.7.3.jar \
+    && chown -R airflow:root /opt/spark
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Volvemos al usuario `airflow` (UID 50000, no privilegiado).
+# A partir de Airflow 2.10 la imagen corre en un venv, así que pip install
+# va al venv activo (NO se usa --user, que es para installs fuera de venv).
+# ─────────────────────────────────────────────────────────────────────────────
+USER airflow
+
+COPY --chown=airflow:root requirements.txt /requirements.txt
+RUN pip install --no-cache-dir -r /requirements.txt
+
+
