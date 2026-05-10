@@ -71,3 +71,49 @@ def get_jdbc_config() -> dict:
             "driver": "org.postgresql.Driver",
         },
     }
+
+# ---------------------------------------------------------------------------
+# Dedup helper — shared by all flatteners.
+#
+# Centralizamos la lógica de dedup para no repetir el window function en
+# cada script. Cada flattener llama a esto con su PK natural:
+#   - flatten_accounts.py     → "account_id"
+#   - flatten_transactions.py → "transaction_id"
+#   - flatten_loans.py        → "loan_id"
+#
+# Criterio: si bronze tiene múltiples loads del mismo dataset (cosa esperable
+# en desarrollo, donde el DAG corre varias veces), la misma PK del array
+# puede aparecer en más de un `bronze_id`. Nos quedamos con la versión MÁS
+# RECIENTE — mayor `load_timestamp` — que es la semántica correcta para un
+# staging que alimenta silver/dbt.
+#
+# Casos degenerados:
+#   - dos versiones con el mismo load_timestamp (DAG corrió dos veces en el
+#     mismo segundo): Spark elige una arbitrariamente. No es determinista
+#     pero los datos son idénticos en ese caso, así que da igual.
+#   - PK nula: row_number() la trata como un grupo aparte y la conserva.
+#     No filtramos nulls acá; si aparecen, es un bug de upstream que dbt
+#     debe atrapar con un test not_null.
+# ---------------------------------------------------------------------------
+def deduplicate_by_pk(df, pk_column: str):
+    """
+    Deduplica un DataFrame staging por su PK natural, quedándose con la
+    versión de mayor `load_timestamp`.
+
+    Args:
+        df: DataFrame con columnas `pk_column` y `load_timestamp`.
+        pk_column: nombre de la PK natural del array (ej: "account_id").
+
+    Returns:
+        DataFrame con una fila por valor único de `pk_column`.
+    """
+    from pyspark.sql.window import Window
+    from pyspark.sql.functions import col, row_number
+
+    w = Window.partitionBy(pk_column).orderBy(col("load_timestamp").desc())
+
+    return (
+        df.withColumn("_rn", row_number().over(w))
+          .filter(col("_rn") == 1)
+          .drop("_rn")
+    )
