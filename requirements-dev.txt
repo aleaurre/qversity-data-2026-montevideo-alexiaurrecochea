@@ -4,3 +4,5 @@ matplotlib==3.8.2
 seaborn==0.13.2
 requests==2.31.0
 ipykernel==6.29.0
+apache-airflow==2.7.3 
+apache-airflow-providers-postgres==5.10.0

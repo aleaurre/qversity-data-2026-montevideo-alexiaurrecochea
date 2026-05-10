@@ -313,3 +313,183 @@ Spark corre en `local[*]` dentro del contenedor de Airflow (no cluster externo).
 Es suficiente para los ~5k records del dataset. **Trade-off documentado:** esta
 configuración no escalaría a millones de filas; en ese caso requeriría un
 cluster Spark externo.
+
+
+## Día 3 — PySpark setup + flatten de accounts
+
+### 1. Decisión arquitectónica: cómo se invoca PySpark desde Airflow
+
+**Opción elegida**: `spark-submit` ejecutado vía `BashOperator`.
+**Alternativa descartada**: PySpark embebido dentro de un `PythonOperator`.
+
+**Razones**:
+- La consigna pide explícitamente "PySpark scripts live in a dedicated folder
+  (e.g., spark/) and are triggered from Airflow", lo que sugiere scripts
+  standalone invocables, no funciones embebidas.
+- Cada script de Spark queda autocontenido y testeable localmente
+  (`spark-submit spark/flatten_accounts.py` desde dentro del container,
+  sin tocar Airflow). Esto aceleró fuertemente el debugging del día.
+- Separación limpia entre orquestación (Airflow) y ejecución (Spark).
+- El overhead de levantar una JVM por task (~10-15s) es irrelevante en
+  un pipeline batch que corre 1x/día.
+
+### 2. Configuración de la SparkSession
+
+Centralizada en `spark/utils.py` con `get_spark_session()`:
+- `master = local[*]` (parametrizable por env var `SPARK_MASTER`).
+- `spark.jars`, `spark.driver.extraClassPath`, `spark.executor.extraClassPath`
+  apuntando al JAR de JDBC (`/opt/spark/jars/postgresql-42.7.3.jar`).
+- `spark.sql.session.timeZone = UTC` para evitar conversiones implícitas
+  según la zona horaria del host. La conversión a hora local se delega
+  a la capa BI.
+- `spark.sql.shuffle.partitions = 4` (default 200), porque corremos en
+  `local[*]` con un dataset chico y 200 particiones generan miles de
+  tareas mínimas con overhead innecesario.
+
+### 3. Manejo de credenciales en scripts de Spark
+
+Las credenciales de Postgres se leen desde variables de entorno
+(`POSTGRES_USER`, `POSTGRES_PASSWORD`, etc.), nunca hardcodeadas.
+
+`get_jdbc_config()` usa `os.environ[...]` (no `.get()`) para usuario y
+password. Si la env var no está, el script falla rápido con `KeyError`
+explícito en lugar de conectar como `None` y devolver un error críptico
+de Postgres segundos después.
+
+### 4. Lectura de bronze: jsonb llega como string, parseado con `from_json`
+
+El driver JDBC de Postgres entrega columnas `jsonb` como `text`, no como
+struct nativo. No hay forma de evitar este round-trip. La lógica:
+
+1. Leer `bronze.raw_fintech_data` por JDBC; `data` viene como string.
+2. Aplicar `from_json(col("data"), customer_partial_schema)` para
+   parsear a struct.
+3. `explode()` sobre el array `accounts`.
+4. Promover los campos del struct a columnas top-level.
+
+### 5. Schema parcial por script
+
+Cada script de Spark declara únicamente la porción del JSON que necesita.
+`flatten_accounts.py` declara `customer_id + accounts[]` y nada más.
+Los demás scripts (transactions, loans) declararán SUS schemas.
+
+**Por qué**: evita acoplamiento implícito. Si el script de accounts
+"conoce" la forma entera del customer, cuando alguien cambia transactions
+este script reacciona inadvertidamente. El schema parcial declara un
+contrato mínimo: "yo solo necesito esto".
+
+### 6. Particionado de la lectura JDBC
+
+`read_bronze` usa `partitionColumn=id`, `lowerBound=1`, `upperBound=100000`,
+`numPartitions=4`.
+
+Para 10.200 records es overkill (un solo split bastaría), pero es la
+práctica correcta y se nota cuando el dataset crece. Documentado para
+que sea reutilizado en los scripts de transactions y loans.
+
+### 7. Estrategia de deduplicación
+
+**Hallazgo**: bronze contiene 10.200 records pero solo 5.000 customers
+únicos. Cada customer aparece duplicado en bronze por múltiples
+`load_timestamp` (consecuencia natural de re-correr el DAG durante
+desarrollo del día 2).
+
+**No truncamos bronze**: la consigna pide preservar el raw faithfully,
+y tener historial de cargas es lo correcto en una capa Bronze
+profesional. La deduplicación se delega a Silver.
+
+**Implementación**: window function en `spark/flatten_accounts.py`:
+
+```python
+Window.partitionBy("account_id").orderBy(col("load_timestamp").desc())
+keep row_number() == 1
+```
+
+Se conserva la versión más reciente de cada cuenta. El mismo patrón
+se aplicará en `stg_transactions` y `stg_loans`.
+
+**Resultado**: 35.740 cuentas tras explode → 17.529 tras dedup
+(eliminó exactamente la mitad, consistente con la teoría de doble carga).
+
+**Implicancia para tests dbt**: la PK `account_id` en `silver.stg_accounts`
+debe ser única. Si en runs futuros este test falla, indica que la window
+function no cubrió algún caso edge — investigar antes de relajar la regla.
+
+### 8. Modo de escritura en silver: `overwrite` con `truncate=true`
+
+`mode=overwrite` + `truncate=true` en el JDBC writer.
+
+**Por qué overwrite**: el contrato de un staging table es "esto refleja
+la última vista de bronze". Si en el futuro queremos historial de cambios,
+eso pertenece a una capa SCD2 en silver/gold, no a staging.
+
+**Por qué truncate=true**: reusa la tabla existente en lugar de
+droppearla y recrearla. Esto preserva permisos, constraints e índices
+que dbt o admin pudieran haber agregado.
+
+### 9. Limpieza de datos: separación de responsabilidades Spark / dbt
+
+Durante el flatten de `accounts[]` detectamos inconsistencias categóricas
+serias (ver hallazgos abajo). La regla de qué se limpia dónde:
+
+- **PySpark (silver staging)**: solo limpieza sintáctica universal.
+  - `trim()` en todos los strings.
+  - String vacío post-trim → `NULL`.
+  - Sin lógica de negocio.
+- **dbt (silver models)**: normalización semántica.
+  - `lower()` para unificar casing.
+  - Mapeo explícito de traducciones.
+  - Tests `accepted_values` para bloquear la introducción de nuevas
+    variantes inadvertidas en runs futuros.
+
+**Por qué**: la normalización semántica involucra decisiones
+(¿`cerrado` y `closed` son equivalentes? sí, pero hay que defenderlo).
+Tenerla en SQL versionado es auditable y queda documentada en
+`schema.yml` de dbt; tenerla en código Python imperativo no.
+Además, los tests de dbt convierten estas reglas en contratos
+verificables automáticamente.
+
+### 10. Hallazgos de calidad de datos en `accounts[]`
+
+**Estructura sana**:
+- 17.529 cuentas, todas con `account_id` único (dedup OK).
+- 5.000 customers, 2-5 cuentas cada uno, distribución pareja.
+- Cero NULLs en campos categóricos (`account_type`, `status`,
+  `currency`, `branch_code`).
+
+**`account_type` — 4 valores reales, 20 variantes en bronze**
+- 5 variantes por valor, todas diferenciadas únicamente por whitespace.
+- Resuelto en Spark con `trim()`: 20 → 4 valores canónicos.
+- Set canónico: `savings`, `checking`, `investment`, `credit_card`.
+
+**`status` — 3 valores reales, 12 variantes en bronze**
+- Variantes por (a) casing inconsistente, (b) traducciones al español.
+- El trim NO colapsa estas variantes (son decisiones semánticas).
+- Familias detectadas:
+  - **active** (5.877): `active`, `Active`, `ACTIVE`, `activo`
+  - **frozen** (5.811): `frozen`, `Frozen`, `FROZEN`, `congelado`
+  - **closed** (5.841): `closed`, `Closed`, `CLOSED`, `cerrado`
+- A resolver en dbt silver con `lower()` + mapping
+  `{cerrado→closed, activo→active, congelado→frozen}`.
+
+**Divergencia consigna vs datos reales**:
+- La consigna documenta `status ∈ {active, inactive, suspended, closed}`.
+- Los datos contienen `{active, frozen, closed}`.
+- No aparecen `inactive` ni `suspended`; sí aparece `frozen`.
+- El test `accepted_values` de dbt usará el set REAL, no el documentado.
+- La consigna avisa explícitamente sobre "unexpected statuses": esto es
+  exactamente ese caso.
+
+**`currency` — limpio, dominio LATAM coherente**:
+- 8 valores: USD + 7 monedas locales (PEN, COP, MXN, UYU, BRL, ARS, CLP).
+- Hallazgo de negocio: **~50% de las cuentas (8.734 / 17.529) están
+  denominadas en USD**, consistente con la dolarización informal en la
+  región (especialmente AR y UY).
+- **Implicancia para Gold**: para la pregunta 2 ("total account balances
+  by country"), hay que decidir si reportar en moneda nominal o convertir
+  a una moneda común. Decisión a tomar en día 5-6.
+
+**`branch_code` — limpio**:
+- Patrón consistente `BR-NNN` (3 dígitos).
+- Distribución pareja en el top 20 (29-36 cuentas por branch).
+- Sin nulls, sin variantes raras.
