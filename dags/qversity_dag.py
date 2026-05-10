@@ -1,16 +1,22 @@
 """
-Qversity ELT — Bronze ingestion + Silver flatten (accounts).
+Qversity ELT — Bronze ingestion + Silver flatten (accounts, transactions, loans).
 
 DAG that:
   1. Ensures bronze.raw_fintech_data exists.
   2. Downloads the fintech dataset from a public S3 bucket.
   3. Loads each customer record into bronze.raw_fintech_data as JSONB.
-  4. Runs a PySpark job (spark-submit) that flattens accounts[] into
-     silver.stg_accounts with dedup and syntactic cleaning.
+  4. Runs three PySpark jobs IN PARALLEL that flatten each nested array
+     (accounts, transactions, loans) into the silver schema, with dedup
+     by each array's natural PK and basic syntactic cleanup.
 
 Idempotency: every run gets a unique load_id (UUID). The Spark dedup logic
-keeps only the most recent version of each account_id, so re-running
-end-to-end is safe and produces no duplicates downstream.
+keeps only the most recent version of each (account_id | transaction_id |
+loan_id), so re-running end-to-end is safe and produces no duplicates
+downstream.
+
+Customer-level dedup is NOT done in PySpark — that's a dbt silver concern,
+since `dim_customers` is a pure flat structure (no array flattening needed)
+and lives naturally in the dbt layer per the project's tool roles.
 """
 from __future__ import annotations
 
@@ -43,6 +49,20 @@ LOCAL_DIR = Path("/tmp/qversity")
 SPARK_SCRIPTS_DIR = "/opt/airflow/spark"
 JDBC_DRIVER = "/opt/spark/jars/postgresql-42.7.3.jar"
 
+# Env vars que necesita cualquier spark-submit del proyecto.
+# BashOperator no propaga el env del scheduler por default, así que se lo
+# pasamos explícito. Mantenemos esto en un dict reutilizable para que el
+# factory de tasks no duplique el bloque.
+SPARK_ENV = {
+    "POSTGRES_HOST":     os.getenv("POSTGRES_HOST", "postgres"),
+    "POSTGRES_PORT":     os.getenv("POSTGRES_PORT", "5432"),
+    "POSTGRES_DB":       os.getenv("POSTGRES_DB",   "qversity_warehouse"),
+    "POSTGRES_USER":     os.getenv("POSTGRES_USER", ""),
+    "POSTGRES_PASSWORD": os.getenv("POSTGRES_PASSWORD", ""),
+    "PATH": "/home/airflow/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "JAVA_HOME": "/usr/lib/jvm/java-17-openjdk-amd64",
+}
+
 DDL = """
 CREATE TABLE IF NOT EXISTS bronze.raw_fintech_data (
     id              BIGSERIAL PRIMARY KEY,
@@ -63,11 +83,42 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Helper: build a spark-submit BashOperator for a flatten script.
+#
+# Los 3 flatteners comparten la misma forma de invocación (mismo --jars,
+# mismo --master, mismo env). Lo único que cambia es qué script ejecutan.
+# Usamos un factory para evitar repetir el bloque tres veces — si mañana
+# hay que cambiar la versión del JDBC driver o un flag de spark-submit, se
+# toca en un solo lugar.
+# ---------------------------------------------------------------------------
+def build_flatten_task(script_name: str) -> BashOperator:
+    """
+    Returns a BashOperator that runs spark-submit on the given script.
+
+    Args:
+        script_name: nombre del script sin extensión (ej: "flatten_accounts").
+                     El task_id se deriva del mismo nombre.
+    """
+    return BashOperator(
+        task_id=script_name,
+        bash_command=(
+            f"spark-submit "
+            f"--jars {JDBC_DRIVER} "
+            f"--driver-class-path {JDBC_DRIVER} "
+            f"--master local[*] "
+            f"{SPARK_SCRIPTS_DIR}/{script_name}.py"
+        ),
+        env=SPARK_ENV,
+        append_env=True,  # keep inherited env vars (Airflow internals, etc.)
+    )
+
+
+# ---------------------------------------------------------------------------
 # DAG
 # ---------------------------------------------------------------------------
 @dag(
     dag_id="qversity_pipeline",
-    description="Bronze ingestion + Silver flatten of accounts via PySpark.",
+    description="Bronze ingestion + Silver flatten (accounts, transactions, loans) via PySpark.",
     start_date=datetime(2026, 1, 1),
     schedule=None,             # manual trigger; dataset is static
     catchup=False,
@@ -146,32 +197,16 @@ def qversity_pipeline():
         return len(rows)
 
     # -----------------------------------------------------------------------
-    # Spark task: flatten accounts[] from bronze into silver.stg_accounts
+    # Spark tasks: 3 flatteners in parallel
     # -----------------------------------------------------------------------
-    # We call spark-submit as a subprocess via BashOperator. The script lives
-    # in /opt/airflow/spark/ (mounted from ./spark on the host). Postgres
-    # credentials are passed through env vars to the subprocess, since
-    # BashOperator does not propagate the scheduler's env by default.
-    flatten_accounts = BashOperator(
-        task_id="flatten_accounts",
-        bash_command=(
-            f"spark-submit "
-            f"--jars {JDBC_DRIVER} "
-            f"--driver-class-path {JDBC_DRIVER} "
-            f"--master local[*] "
-            f"{SPARK_SCRIPTS_DIR}/flatten_accounts.py"
-        ),
-        env={
-            "POSTGRES_HOST": os.getenv("POSTGRES_HOST", "postgres"),
-            "POSTGRES_PORT": os.getenv("POSTGRES_PORT", "5432"),
-            "POSTGRES_DB":   os.getenv("POSTGRES_DB",   "qversity_warehouse"),
-            "POSTGRES_USER":     os.getenv("POSTGRES_USER", ""),
-            "POSTGRES_PASSWORD": os.getenv("POSTGRES_PASSWORD", ""),
-            "PATH": "/home/airflow/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "JAVA_HOME": "/usr/lib/jvm/java-17-openjdk-amd64",
-        },
-        append_env=True,  # keep inherited env vars
-    )
+    # Cada uno lee bronze independientemente y escribe su propia staging
+    # table en silver. No hay dependencias entre ellos, así que pueden ir
+    # en paralelo. Para que esto efectivamente paralelice hace falta que
+    # Airflow esté corriendo con LocalExecutor (o superior); con
+    # SequentialExecutor van a ejecutarse uno tras otro igual.
+    flatten_accounts     = build_flatten_task("flatten_accounts")
+    flatten_transactions = build_flatten_task("flatten_transactions")
+    flatten_loans        = build_flatten_task("flatten_loans")
 
     # -----------------------------------------------------------------------
     # Dependencies
@@ -180,7 +215,14 @@ def qversity_pipeline():
     local_path = download_from_s3()
     loaded = load_to_bronze(local_path)
 
-    ensure >> local_path >> loaded >> flatten_accounts
+    # ensure → download → load → [3 flatteners en paralelo]
+    # La sintaxis de lista en el lado derecho es la forma idiomática de
+    # Airflow para fan-out paralelo desde un solo task upstream.
+    ensure >> local_path >> loaded >> [
+        flatten_accounts,
+        flatten_transactions,
+        flatten_loans,
+    ]
 
 
 qversity_pipeline()
