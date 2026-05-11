@@ -1,0 +1,51 @@
+version: 2
+
+# dbt sources for the Qversity pipeline.
+#
+# These tables are NOT created by dbt — they are produced upstream:
+#   - bronze.raw_fintech_data is loaded by the Airflow DAG (psycopg2 + S3 download)
+#   - silver.stg_accounts / stg_transactions / stg_loans are written by PySpark
+#     via JDBC.
+#
+# Declaring them as sources gives us:
+#   1. Lineage (sources show up in `dbt docs`)
+#   2. Freshness checks (optional, useful later for "did the DAG actually run today?")
+#   3. The `{{ source(...) }}` macro instead of hardcoded "bronze.raw_fintech_data"
+#      in every model — so if we ever rename, it's one edit.
+
+sources:
+
+  - name: bronze
+    description: >
+      Raw ingestion layer. One row per JSON record downloaded from S3,
+      stored as JSONB to preserve the original structure faithfully.
+    schema: bronze
+    tables:
+      - name: raw_fintech_data
+        description: >
+          Raw customer records (~5000 rows for a single load). Each row's `data`
+          column contains one customer object with nested arrays (accounts,
+          transactions, loans) and nested objects (credit_info, digital_engagement).
+        columns:
+          - name: id
+            description: Surrogate row id assigned at ingestion time.
+          - name: data
+            description: Full customer record as JSONB.
+          - name: load_timestamp
+            description: When the record was inserted by Airflow.
+          - name: load_id
+            description: UUID of the DAG run that produced this row. Used by Spark dedup.
+
+  - name: silver_staging
+    description: >
+      Output of the PySpark flatteners. These tables have already had their
+      arrays exploded and PK deduplication applied; dbt's job is to clean
+      types, normalize categories, and build dimensional models on top.
+    schema: silver
+    tables:
+      - name: stg_accounts
+        description: One row per (customer, account). Produced by spark/flatten_accounts.py.
+      - name: stg_transactions
+        description: One row per transaction. Produced by spark/flatten_transactions.py.
+      - name: stg_loans
+        description: One row per loan. Produced by spark/flatten_loans.py.
