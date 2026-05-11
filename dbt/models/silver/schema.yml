@@ -1,0 +1,66 @@
+version: 2
+
+# Tests for silver models.
+#
+# Day 5 MVP coverage: PK uniqueness, not-null on identity, accepted_values on
+# the controlled categoricals listed explicitly in the project spec. The full
+# set (segment, risk_score range, referential integrity to accounts/transactions/
+# loans) lands on day 6 with the rest of silver.
+
+models:
+
+  - name: dim_customer
+    description: >
+      One row per customer. Flat customer attributes from bronze, cast and
+      enriched with age + age_bucket.
+    columns:
+
+      - name: customer_id
+        description: Business key from the source system. Format CUST-XXXXXXX.
+        tests:
+          - unique
+          - not_null
+
+      - name: email
+        description: Customer email address. Not enforced unique because the
+                     dataset may legitimately contain shared emails (joint
+                     accounts, family). We test for non-null only.
+        tests:
+          - not_null
+
+      - name: country
+        description: ISO country code, restricted to the seven LATAM markets
+                     listed in the project spec.
+        tests:
+          - not_null
+          - accepted_values:
+              # Source: Qversity spec §3.2 — Colombia, Uruguay, Argentina,
+              # Mexico, Chile, Peru, Brazil.
+              values: ['CO', 'UY', 'AR', 'MX', 'CL', 'PE', 'BR']
+
+      - name: kyc_status
+        description: KYC verification state from the source system.
+        tests:
+          - accepted_values:
+              # Source: Qversity spec §3.3 — verified / pending / expired / rejected.
+              values: ['verified', 'pending', 'expired', 'rejected']
+
+      - name: status
+        description: Customer relationship state.
+        tests:
+          - accepted_values:
+              # Source: Qversity spec §3.3.
+              values: ['active', 'inactive', 'suspended', 'closed']
+
+      - name: customer_segment
+        description: Business segmentation tier.
+        tests:
+          - accepted_values:
+              # Source: Qversity spec §3.3.
+              values: ['retail', 'premium', 'private_banking', 'sme']
+
+      - name: age
+        description: Completed years from date_of_birth at run time. May be
+                     null when date_of_birth is missing or unparseable.
+        # No test here on day 5; on day 6 we'll add a custom test that age
+        # is between 18 and 100 when not null (banks don't have minors).
