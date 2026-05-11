@@ -1,0 +1,37 @@
+# Snippet to add to docker-compose.yml — under each Airflow service
+# (webserver and scheduler) in the `volumes:` block.
+#
+# This bind-mounts the repo's dbt/ folder into the container at the path
+# DBT_PROFILES_DIR expects (/opt/airflow/dbt). The mount is read-write so
+# `target/` and `logs/` written by dbt land back on the host — handy for
+# debugging, and they're already in .gitignore so they won't be committed.
+
+services:
+  airflow-webserver:
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./spark:/opt/airflow/spark
+      - ./dbt:/opt/airflow/dbt          # <-- ADD THIS LINE
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+
+  airflow-scheduler:
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./spark:/opt/airflow/spark
+      - ./dbt:/opt/airflow/dbt          # <-- ADD THIS LINE
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+
+# Make sure the same POSTGRES_* env vars used by Airflow are passed to dbt.
+# If you already have them in the airflow-common env block, dbt picks them
+# up for free because of env_var() in profiles.yml.
+#
+# Required env vars (already in .env from day 1, but confirm):
+#   POSTGRES_HOST=postgres
+#   POSTGRES_PORT=5432
+#   POSTGRES_USER=...
+#   POSTGRES_PASSWORD=...
+#   POSTGRES_DB=qversity
+#   DBT_SCHEMA=public      # default target schema; the custom macro routes
+#                          # to bronze/silver/gold by folder

@@ -170,3 +170,97 @@ In a healthy run with N bronze loads of the same dataset, `duplicates
 dropped` should equal `(N-1) × <expected entity count>`. If it's higher, a
 PK collision exists upstream that wasn't there before; if it's lower, a load
 went partial.
+
+
+# dbt — section to add to the main README.md
+
+## Transformation layer (dbt)
+
+dbt is responsible for all SQL-based transformations on top of what
+PySpark and Airflow produce. Its scope is intentionally narrow: it
+**does not ingest** (that's Airflow) and **does not explode arrays**
+(that's Spark). dbt owns:
+
+1. **Flattening nested objects** (`credit_info`, `digital_engagement`) and
+   the **flat root fields** of the bronze JSONB.
+2. **Building dimensions and facts** in the `silver` schema.
+3. **Building analytics models** in the `gold` schema that map directly
+   onto the 24 business questions.
+4. **Testing data quality** (uniqueness, referential integrity,
+   accepted values, custom rules).
+
+### Why dbt lives inside the Airflow container
+
+`dbt-core` and `dbt-postgres` are installed in the same Python environment
+as Airflow and PySpark. Reasoning:
+
+- The project must run from a single `docker compose up -d --build`. A
+  separate dbt service would add a container with no independent purpose
+  (dbt has no daemon — it's a CLI invoked on demand).
+- Airflow orchestrates dbt via `BashOperator`. The bash command needs
+  `dbt` on `$PATH`, which is automatic when dbt is installed in the same
+  container.
+- Manual debugging is one command:
+  ```bash
+  docker compose exec airflow-scheduler bash -lc \
+    "cd /opt/airflow/dbt && dbt run --profiles-dir /opt/airflow/dbt"
+  ```
+
+### Schema layout
+
+| Schema  | Owner   | Contents                                          |
+|---------|---------|---------------------------------------------------|
+| bronze  | Airflow | `raw_fintech_data` (JSONB, one row per customer)  |
+| silver  | Spark + dbt | Spark: `stg_accounts`, `stg_transactions`, `stg_loans`. dbt: `dim_customer` (+ more on day 6) |
+| gold    | dbt     | `customer_summary` (+ more analytics marts later) |
+
+A custom `generate_schema_name` macro keeps schema names unprefixed
+(`bronze` / `silver` / `gold`) rather than dbt's default `<target>_<layer>`.
+
+### Day-5 MVP scope
+
+The day-5 commit lands the minimal end-to-end:
+
+- `silver.dim_customer` — flat fields from bronze JSONB, casted and
+  enriched with `age` + `age_bucket`. Deduplicated by `customer_id`
+  keeping the most recent `load_timestamp` per business key.
+- `gold.customer_summary` — one row per customer with product counts.
+- Two dbt tasks chained at the end of the DAG: `dbt_run_mvp` then
+  `dbt_test_mvp`, each scoped to those two models via `--select`.
+
+This MVP answers business question **Q10 — customer count by country and city**
+directly from `gold.customer_summary`. See `sql/day5_mvp_validation.sql`
+for the validation queries.
+
+### How to run dbt manually
+
+```bash
+# Inside the airflow-scheduler container
+cd /opt/airflow/dbt
+
+# Build everything (currently only the two MVP models)
+dbt run --profiles-dir /opt/airflow/dbt
+
+# Run only silver
+dbt run --profiles-dir /opt/airflow/dbt --select silver
+
+# Test everything
+dbt test --profiles-dir /opt/airflow/dbt
+
+# Inspect compiled SQL (great for debugging jsonb extractions)
+dbt compile --profiles-dir /opt/airflow/dbt
+# -> compiled files appear under dbt/target/compiled/
+```
+
+### Environment variables consumed by dbt
+
+These are read by `env_var()` in `dbt/profiles.yml`:
+
+| Variable            | Default     | Purpose                          |
+|---------------------|-------------|----------------------------------|
+| `POSTGRES_HOST`     | `postgres`  | DNS name in docker network       |
+| `POSTGRES_PORT`     | `5432`      | Standard PG port                 |
+| `POSTGRES_USER`     | (required)  | DB user with DDL on bronze/silver/gold |
+| `POSTGRES_PASSWORD` | (required)  | Pulled from `.env`, never committed |
+| `POSTGRES_DB`       | `qversity`  | Database name                    |
+| `DBT_SCHEMA`        | `public`    | Target schema; the macro overrides per folder |

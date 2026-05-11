@@ -8,9 +8,23 @@
 FROM apache/airflow:2.10.5-python3.11
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Cambiamos a root SOLO para instalar paquetes APT y bajar el driver JDBC.
-# El contenedor en runtime NO corre como root — termina como `airflow` (UID 50000).
+# Capa 1 — Paquetes del sistema operativo.
+# Todo lo de apt va junto y arriba porque rara vez cambia. Si lo mezcláramos
+# con pip install, cada edit a requirements.txt invalidaría también esta capa
+# y agregaría ~60s de rebuild innecesarios.
+#
+# Qué se instala y por qué:
+#   - openjdk-17-jre-headless : runtime de Java para PySpark. "headless" omite
+#                               librerías gráficas (~150 MB ahorrados).
+#   - curl                    : para bajar el driver JDBC en la capa siguiente.
+#                               Más reproducible que wget en imágenes Debian.
+#   - procps                  : provee `ps`, usado por Spark al monitorear sus
+#                               propios procesos hijos. Sin esto, Spark loggea
+#                               warnings molestos al iniciar cada job.
+#   - git                     : para clonar el repo dbt en el bind mount. No es
+#                               estrictamente necesario, pero facilita el workflow.         
 # ─────────────────────────────────────────────────────────────────────────────
+
 USER root
 
 RUN apt-get update \
@@ -18,6 +32,7 @@ RUN apt-get update \
         openjdk-17-jre-headless \
         curl \
         procps \
+        git \
     && apt-get autoremove -yqq --purge \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -25,20 +40,43 @@ RUN apt-get update \
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
-# Driver JDBC de Postgres para PySpark.
+# ─────────────────────────────────────────────────────────────────────────────
+# Capa 2 — Driver JDBC de Postgres para PySpark.
+# Una sola descarga, capa estable. Pinneamos la versión 42.7.3 para que el
+# build sea reproducible — si jdbc.postgresql.org cambia "latest", nuestra
+# imagen no se rompe en silencio.
+# ─────────────────────────────────────────────────────────────────────────────
 RUN mkdir -p /opt/spark/jars \
     && curl -fsSL -o /opt/spark/jars/postgresql-42.7.3.jar \
         https://jdbc.postgresql.org/download/postgresql-42.7.3.jar \
     && chown -R airflow:root /opt/spark
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Volvemos al usuario `airflow` (UID 50000, no privilegiado).
-# A partir de Airflow 2.10 la imagen corre en un venv, así que pip install
-# va al venv activo (NO se usa --user, que es para installs fuera de venv).
+# Capa 3 — Dependencias Python (incluyendo dbt).
+# Volvemos al usuario `airflow` (UID 50000, no privilegiado) — el resto del
+# Dockerfile y el runtime corren como airflow. Esta capa cambia seguido
+# (cada vez que tocamos requirements.txt), por eso va al final.
+#
+# Por qué pip install -r requirements.txt y no instalar dbt aparte:
+# Single source of truth para versiones Python. dbt-core y dbt-postgres
+# están pinneados ahí junto al resto.
+#
+# Por qué no usamos los constraints de Airflow (-c ...constraints.txt):
+# Airflow publica constraints solo para los extras que distribuye. dbt no
+# está en esa lista, así que aplicar constraints rompería el install.
+# Confiamos en los pins explícitos del requirements.txt.
 # ─────────────────────────────────────────────────────────────────────────────
 USER airflow
 
 COPY --chown=airflow:root requirements.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
 
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Variables de runtime.
+# DBT_PROFILES_DIR: dbt lee este env var antes que cualquier flag. Lo apuntamos
+# al mismo path donde docker-compose bind-mountea el proyecto dbt. Así
+# `dbt run` desde un BashOperator funciona sin necesidad de `--profiles-dir`,
+# aunque igual lo pasamos explícito en el DAG para que el comando sea
+# reproducible fuera del contenedor.
+# ─────────────────────────────────────────────────────────────────────────────
+ENV DBT_PROFILES_DIR=/opt/airflow/dbt
