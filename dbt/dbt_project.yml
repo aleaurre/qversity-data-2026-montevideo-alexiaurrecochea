@@ -1,0 +1,65 @@
+# dbt project configuration for the Qversity fintech pipeline.
+#
+# Materialization strategy by layer (Bronze / Silver / Gold):
+#
+#   - bronze/  -> ephemeral or view
+#       Bronze is already a physical table in Postgres (loaded by Airflow).
+#       Any dbt model in `bronze/` is a thin wrapper or alias, so we keep
+#       it cheap. We default to `view` to avoid duplicating raw jsonb.
+#
+#   - silver/  -> table
+#       Silver models do the heavy flattening (jsonb -> columns) and the
+#       casting. Materializing as `table` means downstream Gold models
+#       and ad-hoc queries don't repeat the json parsing on every read,
+#       which on Postgres is non-trivial for ~5k records x N attributes.
+#
+#   - gold/    -> table
+#       Gold is what PowerBI hits. Tables = fast, no surprises for the
+#       BI tool. Refreshed once per DAG run.
+#
+# Schemas: we map each folder to its own Postgres schema (bronze / silver /
+# gold) so the layered architecture is visible at the database level too.
+# Combined with profiles.yml this means `dbt run` writes to
+# `qversity.<layer>.<model_name>` — no cross-schema confusion.
+
+name: 'qversity'
+version: '0.1.0'
+config-version: 2
+
+# Profile name resolved in profiles.yml. We use the same name as the project
+# to keep things obvious; there's only one profile in this repo.
+profile: 'qversity'
+
+# Default paths. Standard dbt layout.
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+# Clean targets: what `dbt clean` will remove. `target/` holds compiled SQL
+# and run artifacts; `dbt_packages/` holds installed packages (none yet).
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  qversity:
+    # Per-layer config. The `+schema` key here is a SUFFIX appended to the
+    # target schema defined in profiles.yml. To get clean `bronze` /
+    # `silver` / `gold` schema names (not `qversity_bronze`) we set
+    # `generate_schema_name` via a custom macro — see macros/generate_schema_name.sql.
+    bronze:
+      +materialized: view
+      +schema: bronze
+    silver:
+      +materialized: table
+      +schema: silver
+    gold:
+      +materialized: table
+      +schema: gold
+
+# Variables — we'll add more here as Silver/Gold expand. For day 5 there's
+# nothing to parameterize yet.
+vars: {}

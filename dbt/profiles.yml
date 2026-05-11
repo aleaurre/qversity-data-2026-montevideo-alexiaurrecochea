@@ -1,0 +1,52 @@
+# dbt profiles for Qversity.
+#
+# This file lives inside the repo on purpose: it documents how dbt connects
+# to the warehouse, and CI / reviewers can run `dbt run --profiles-dir ./dbt`
+# without copying anything to their home directory.
+#
+# All sensitive values are read from environment variables via `env_var()`.
+# The defaults are SAFE non-secrets and the .env file (gitignored) provides
+# the real values. Order of resolution at runtime:
+#
+#   1. POSTGRES_* env vars from .env -> docker-compose -> airflow container
+#   2. If a var is missing, env_var() raises and dbt fails fast (good).
+#
+# `host` defaults to "postgres" — the service name of the Postgres container
+# in docker-compose. From inside the airflow container, that's the hostname
+# Docker's DNS resolves. From the host machine you'd override POSTGRES_HOST
+# to "localhost" when running dbt outside the container.
+
+qversity:
+  target: dev
+  outputs:
+
+    dev:
+      type: postgres
+      host: "{{ env_var('POSTGRES_HOST', 'postgres') }}"
+      port: "{{ env_var('POSTGRES_PORT', '5432') | int }}"
+      user: "{{ env_var('POSTGRES_USER') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD') }}"
+      dbname: "{{ env_var('POSTGRES_DB', 'qversity') }}"
+
+      # The default schema dbt writes to. Combined with the custom
+      # generate_schema_name macro and the +schema config in dbt_project.yml,
+      # actual schemas resolved per layer become: bronze, silver, gold.
+      # (Without the macro, dbt would prefix them as
+      # `<schema>_bronze`, `<schema>_silver`, etc.)
+      schema: "{{ env_var('DBT_SCHEMA', 'public') }}"
+
+      # Connection tuning. 4 threads is plenty for a single-node dev box
+      # with ~30 models total. If we ever hit Postgres connection limits
+      # we lower this; if we want faster runs in CI we raise it.
+      threads: 4
+
+      # Keepalives matter when dbt is invoked by Airflow: long-running
+      # transformations can otherwise be killed by intermediate proxies
+      # or by Docker's default tcp_keepalive settings.
+      keepalives_idle: 0
+
+      # Search path: ensures unqualified table references resolve to the
+      # layered schemas in the expected order. dbt itself always
+      # fully-qualifies, but ad-hoc queries from `dbt run-operation` or
+      # macros benefit from this.
+      search_path: "bronze,silver,gold,public"
