@@ -578,3 +578,257 @@ In a healthy run with N bronze loads of the same dataset, `duplicates
 dropped` should equal `(N-1) × <expected entity count>`. If it's higher, a
 PK collision exists upstream that wasn't there before; if it's lower, a load
 went partial.
+
+
+
+## Day 6 — Silver dbt Design Decisions
+
+### Refined Spark vs dbt responsibility split
+
+The original split (Spark = syntactic, dbt = semantic) is refined to be more precise:
+
+- **Spark handles array flattening** (`accounts[]`, `transactions[]`, `loans[]`):
+  cardinality changes via `explode`; distributed compute semantics genuinely apply.
+- **dbt handles flat fields and nested objects** (customer fields, `credit_info{}`,
+  `digital_engagement{}`): cardinality is preserved 1:1 with customer; Postgres
+  `jsonb` operators are both performant (5k rows) and idiomatic.
+- **Deduplication follows the same logic**: array entities (accounts, txns, loans)
+  are deduped in Spark as part of their explode pipeline. Customer dedup happens
+  in dbt because customers are not exploded — they are extracted flat from bronze.
+
+Rationale: the meaningful distinction is *whether explode is needed*, not
+*whether dedup is needed*. Forcing customer through Spark just to dedup would
+require a script that doesn't actually flatten anything, breaking the naming
+convention (`flatten_*`) and introducing a fourth Spark script with no
+distributed-compute justification.
+
+### Status field divergence (correction to Day 1 EDA notes)
+
+Earlier notes conflated two `status` fields. Distinct findings:
+
+- **`account.status`** (`silver.stg_accounts`): contains `active / frozen / closed`.
+  Diverges from the brief, which specifies `active / inactive / suspended / closed`.
+  Documented divergence; `accepted_values` test reflects observed data.
+- **`customer.status`** (bronze raw): contains 20 surface variants across 4
+  canonical values: `active / inactive / suspended / closed`. **These 4 canonical
+  values exactly match the brief.** Variants are casing chaos (`Active`, `ACTIVE`)
+  plus Spanish translations (`activo`, `suspendido`, `cerrado`, `inactivo`,
+  including their casing variants). 4,223 of 5,000 records (84.5%) use a
+  canonical value; 777 (15.5%) need normalization.
+- Normalization happens in `stg_customers.sql` via lowercase + Spanish→English
+  mapping. `accepted_values` test on the resulting 4 canonical values.
+
+### Data quality findings (from `silver.dim_customer` audit, dropped today)
+
+The legacy `silver.dim_customer` table (origin unknown; no script generates it;
+dropped today) was useful as an audit surface and surfaced three findings:
+
+- **340 customers (6.8%) have invalid coordinates**: `lat` outside [-90, 90] or
+  `lon` outside [-180, 180]. Likely generator bug in the dataset.
+  Treatment: `is_geo_valid` boolean flag in `dim_customer`; `lat`/`lon` set to
+  NULL when invalid. Preserves the record (no row loss) while making the
+  data quality issue explicit and queryable.
+- **`nationality` equals `country` in 100% of records.** Field is informationally
+  redundant. Treatment: keep in `dim_customer` as a verbatim copy (in case
+  downstream analysis ever differentiates), but add a `dbt_utils.expression_is_true`
+  test asserting equality. If the test ever fails in a future run, that's a
+  signal to revisit.
+- **City names contain typos** (e.g. `Lma` for `Lima`). Treatment: deferred.
+  Documented as known dataset quality issue; will not affect aggregations
+  by `country` (the primary geographic dimension for business questions 2, 6, 10).
+
+### Bucketing definitions
+
+These cover business questions 9, 11, 21, and partially 5, 6, 7.
+
+**Age buckets** (from `date_of_birth`, computed via `AGE()`):
+- `18-25` — students / early career
+- `26-35` — millennials, peak product acquisition
+- `36-50` — peak earning years
+- `51-65` — pre-retirement
+- `65+` — retirees
+
+Rationale: standard LATAM fintech segmentation aligned with life stages and
+product affinity. Anyone under 18 in the data is treated as a data quality
+issue (flagged, not bucketed).
+
+**Tenure buckets** (from `registration_date`, computed via months difference):
+- `new` — < 6 months
+- `established` — 6 to 24 months
+- `loyal` — > 24 months
+
+**Risk score buckets** (from `risk_score`, 0-100 numeric):
+- `low` — 0 to 30
+- `medium` — 30 to 60
+- `high` — 60 to 85
+- `critical` — 85 to 100
+
+Aligned with business question 9. Boundaries chosen to roughly approximate
+equal-population quartiles based on EDA.
+
+**Credit score buckets** (FICO standard):
+- `poor` — 300-579
+- `fair` — 580-669
+- `good` — 670-739
+- `very_good` — 740-799
+- `excellent` — 800-850
+
+### Naming conventions for dbt models
+
+- `stg_*` — staging layer, one model per source table or extracted object.
+  Materialization: view (cheap to rebuild, no aggregation).
+- `dim_*` — dimensions in the silver layer. Materialization: table (joined
+  downstream by gold models).
+- `fact_*` — facts in the silver layer (transactions, loan_snapshots). Tables.
+- Gold marts will use `mart_*` or `gold_*` prefix (decided in Day 6+).
+
+
+### Note on legacy table cleanup
+
+A `silver.dim_customer` table existed at the start of Day 6, origin unknown
+(no Spark script generates it; likely created during Day 1 exploration or
+PoC work). It was dropped manually via `DROP TABLE silver.dim_customer`
+before starting dbt modeling. No reproducible script is included because the
+table is not part of the pipeline — the canonical `dim_customer` is now
+built by dbt and any future clean-clone setup will never produce the legacy
+version.
+
+
+## Day 6 — Silver dbt Design Decisions
+
+### Refined Spark vs dbt responsibility split
+
+The original split (Spark = syntactic, dbt = semantic) is refined to be more precise:
+
+- **Spark handles array flattening** (`accounts[]`, `transactions[]`, `loans[]`):
+  cardinality changes via `explode`; distributed compute semantics genuinely apply.
+- **dbt handles flat fields and nested objects** (customer fields, `credit_info{}`,
+  `digital_engagement{}`): cardinality is preserved 1:1 with customer; Postgres
+  `jsonb` operators are both performant (5k rows) and idiomatic.
+- **Customer deduplication lives in dbt**, not Spark. Rationale: customer is not
+  an array — it's the root of each JSON record. A Spark script for customer
+  would not actually flatten anything (no `explode` involved); it would only
+  dedup, which Postgres handles trivially at this volume via `ROW_NUMBER()`.
+  Forcing it through Spark would break the `flatten_*` naming convention and
+  add a script without distributed-compute justification.
+
+The meaningful distinction is *whether explode is needed*, not *whether dedup
+is needed*.
+
+### Customer status field — full picture
+
+Earlier EDA notes (day 1) flagged `status` divergence but conflated two fields.
+Distinct findings:
+
+- **`account.status`** (in `silver.stg_accounts`, produced by Spark): contains
+  only `active / frozen / closed`. Diverges from the brief spec which lists
+  `active / inactive / suspended / closed`. Documented divergence;
+  `accepted_values` test in dbt will reflect the observed three values.
+- **`customer.status`** (in `bronze.raw_fintech_data`): contains 20 surface
+  variants across 4 canonical values. **The 4 canonical values exactly match
+  the brief**: `active / inactive / suspended / closed`. Variants are casing
+  chaos (`Active`, `ACTIVE`) plus Spanish translations (`activo`, `suspendido`,
+  `cerrado`, `inactivo`, with their own casing variants). 4,223 of 5,000 rows
+  (84.5%) use canonical values; 777 (15.5%) require normalization.
+- Normalization is implemented in macro `normalize_customer_status` (lowercase
+  + Spanish→English mapping). Applied in `dim_customer.sql`.
+
+### Data quality findings (from legacy `silver.dim_customer` audit, now dropped)
+
+A legacy `silver.dim_customer` table was found in Postgres at the start of
+day 6, origin unknown (no Spark script generates it; likely created during
+day 1 exploration). It was dropped manually before starting dbt modeling.
+While it was not part of the pipeline, it served as a useful audit surface
+and surfaced three findings now addressed in the canonical dbt-built
+`dim_customer`:
+
+- **340 customers (6.8%) have invalid coordinates**: `lat` outside [-90, 90]
+  or `lon` outside [-180, 180]. Likely a generator bug.
+  Treatment: `is_geo_valid` boolean flag; `lat`/`lon` set to NULL when invalid.
+  Preserves the record while making the data quality issue explicit.
+- **`nationality` equals `country` in 100% of records**. Informationally
+  redundant. Treatment: kept in `dim_customer` (in case downstream ever
+  differentiates) with a `dbt_utils.expression_is_true` test asserting
+  equality. A future test failure would be a useful signal.
+- **City names contain typos** (e.g. `Lma` for `Lima`). Deferred. Aggregations
+  by `country` (the primary geographic dimension for business questions 2, 6,
+  10) are unaffected.
+
+The legacy table is not reproducible from any script; no clean-clone setup
+will produce it. No cleanup SQL committed.
+
+### Bucketing definitions
+
+These support business questions 9, 11, 21, and partially 5, 6, 7. Implemented
+as reusable dbt macros (`age_bucket`, `tenure_bucket`).
+
+**Age buckets** (macro `age_bucket(date_of_birth)`):
+- `under_18` — flagged as data quality issue (banks don't onboard minors)
+- `18-25` — students / early career
+- `26-35` — millennials, peak product acquisition
+- `36-50` — peak earning years
+- `51-65` — pre-retirement
+- `65+` — retirees
+- `unknown` — when `date_of_birth` is NULL or unparseable
+
+**Tenure buckets** (macro `tenure_bucket(registration_date)`):
+- `new` — < 6 months
+- `established` — 6 to 24 months
+- `loyal` — > 24 months
+- `unknown` — when `registration_date` is NULL or unparseable
+
+**Risk score buckets** (deferred to gold layer — only used in business
+question 9, no value adding to dim_customer):
+- `low` (0-30), `medium` (30-60), `high` (60-85), `critical` (85-100)
+
+**Credit score buckets** (deferred to gold layer — used in Q6, lives more
+naturally with credit_info):
+- `poor` (300-579), `fair` (580-669), `good` (670-739),
+  `very_good` (740-799), `excellent` (800-850)
+
+### Customer activity model placement
+
+A `customer_summary` model written in a prior session lives in `models/gold/`.
+On reflection, its grain (1 row per customer) and contents (identity +
+product counts) make it a **silver-layer aggregate**, not a gold mart. It is
+moved to `models/silver/agg_customer_activity.sql`. Rationale:
+
+- Gold marts in this project will use a `mart_*` or `gold_*` prefix and have
+  business-question-specific grains (customer-month, segment-month, loan,
+  etc.). A per-customer count table doesn't belong with them.
+- An `agg_*` prefix in silver honestly describes the model: it's an aggregate,
+  not a fact (no transactional grain) and not a dimension (has measures, not
+  attributes).
+- Snapshot semantics: refreshed full per run, not slowly changing.
+
+### Naming conventions for dbt models
+
+- `stg_*` — staging, one model per source. Materialization: view.
+- `dim_*` — dimensions in silver. Materialization: table.
+- `fact_*` — transactional facts in silver (e.g. `fact_transactions`,
+  `fact_loan_payments` if added). Materialization: table.
+- `agg_*` — aggregates in silver (e.g. `agg_customer_activity`).
+  Materialization: table.
+- Gold marts (day 7+) — prefix to be decided, likely `mart_*` or `gold_*`.
+
+
+
+### Generalized pattern: all customer-level categoricals need normalization
+
+Day 6 testing surfaced that the casing chaos + Spanish translation pattern
+documented for `customer.status` is NOT isolated to that field. It is a
+**generator-wide pattern** affecting every categorical field in the dataset:
+
+- `customer.status` — 20 variants, ~15.5% non-canonical (documented day 1).
+- `customer.kyc_status` — 8 variants, ~7.6% non-canonical. Only casing
+  variants (no Spanish translations). Normalized via `normalize_kyc_status`.
+- `customer.customer_segment` — 16 variants, ~15.7% non-canonical. Both
+  casing and Spanish translations. Normalized via `normalize_customer_segment`.
+
+Implication for downstream silver models: any categorical field arriving
+from bronze (transactions.channel, transactions.category, transactions.type,
+transactions.status, accounts.account_type, loans.type, loans.status,
+gender, etc.) must be assumed to have casing/translation variants until
+empirically proven otherwise. Each gets its own `normalize_*` macro
+following the same pattern (lowercase+trim, optional ES→EN CASE map,
+else-passthrough so unexpected values fail tests loudly).
