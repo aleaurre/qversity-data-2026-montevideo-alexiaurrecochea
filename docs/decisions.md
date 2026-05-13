@@ -832,3 +832,20 @@ gender, etc.) must be assumed to have casing/translation variants until
 empirically proven otherwise. Each gets its own `normalize_*` macro
 following the same pattern (lowercase+trim, optional ES→EN CASE map,
 else-passthrough so unexpected values fail tests loudly).
+
+
+### Tests configured as `warn` for documented data quality issues
+
+Some `not_null` tests are intentionally set to `severity: warn` instead of
+the default error level. This captures data quality issues from the source
+generator without blocking the build. Affected fields:
+
+- `silver.stg_accounts.balance` — 486 NULLs (2.8%), uniformly distributed
+  across all account_types. Confirmed not a parsing or join issue;
+  comes as NULL in the bronze JSON for those records.
+
+The pattern is: if a test fails because of generator data quality (not
+because of a bug in our code), warn lets the issue stay visible in
+`dbt test` output while keeping the pipeline runnable. If the dataset is
+ever refreshed and the NULL rate changes significantly, we'll see it
+in the warn count.
