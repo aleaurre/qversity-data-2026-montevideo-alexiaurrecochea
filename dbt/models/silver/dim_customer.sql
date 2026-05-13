@@ -8,8 +8,26 @@
 /*
     silver.dim_customer
     -------------------
-    One row per customer. Extracts the FLAT fields from bronze.raw_fintech_data
-    and casts them to proper types.
+    One row per customer. Extracts flat customer fields from
+    bronze.raw_fintech_data, deduplicates, casts to proper types, normalizes
+    categorical values, validates geographic coordinates, and enriches with
+    derived dimensions (age, age_bucket, tenure_months, tenure_bucket).
+
+    -----------------------------------------------------------------------
+    DEDUP STRATEGY
+    -----------------------------------------------------------------------
+    The bronze layer uses append-with-load_id semantics: each DAG run inserts
+    a fresh batch of records, all tagged with the same UUID load_id. EDA on
+    day 1 found ~100 customer_id duplicates within a single batch (likely a
+    generator bug). We deduplicate by `customer_id` keeping the most recent
+    `load_timestamp` — this also handles the future case of re-runs producing
+    multiple batches.
+
+    Why dedup here in dbt and not in Spark like accounts/transactions/loans:
+    customer is the root of the JSON record, not an array. A Spark script
+    would not actually flatten anything — only dedup — which Postgres handles
+    trivially via ROW_NUMBER() at 5k-row scale. Documented in decisions.md
+    under "Refined Spark vs dbt responsibility split".
 
     -----------------------------------------------------------------------
     DATE FORMAT NOTE (discovered in EDA, day 5)
@@ -28,22 +46,25 @@
                                                               so dash = MDY (US locale)
       Compact YYYYMMDD     n/a     19500509     ~6%           unambiguous
 
-    Why slash is DMY and dash is MDY in the SAME dataset:
-    the data appears to have been synthetically generated with intentional
-    format and locale variability. This is unusual and not what one would
-    expect from a single source system. The cleanest representation
-    in silver is still a proper `date` type, regardless of input chaos.
+    Strategy: detect format by regex, apply TO_DATE() with matching pattern,
+    NULL on unknown formats. Custom test below flags excessive NULL rates.
 
-    Strategy:
-      1. Detect input format by regex (4 explicit branches + NULL guard).
-      2. Apply TO_DATE() with the format string matching that branch.
-      3. Unknown formats become NULL. We'll add a custom dbt test on
-         day 6 to flag if the NULL rate climbs above a small threshold.
+    -----------------------------------------------------------------------
+    GEO VALIDATION
+    -----------------------------------------------------------------------
+    EDA found 340 of 5000 customers (6.8%) have lat/lon outside valid ranges
+    ([-90, 90] for lat, [-180, 180] for lon). Treatment: NULL the invalid
+    coordinates AND emit an `is_geo_valid` boolean flag. This preserves the
+    customer record (no row loss) while making the data quality issue
+    queryable from downstream models.
 
-    Why not change Postgres' `datestyle` GUC:
-    a single global setting can pick only one of {ISO, DMY, MDY}; it
-    cannot represent multi-format data. Per-row parsing via CASE is the
-    only correct approach here.
+    -----------------------------------------------------------------------
+    STATUS NORMALIZATION
+    -----------------------------------------------------------------------
+    Customer.status has 20 surface variants across 4 canonical values
+    (active / inactive / suspended / closed). Casing chaos + Spanish
+    translations. Normalized via `normalize_customer_status` macro.
+    See decisions.md for full mapping.
 */
 
 with bronze_dedup as (
@@ -99,9 +120,9 @@ flat as (
         (data ->> 'country')::text             as country,
         (data ->> 'address')::text             as address,
 
-        -- ---------- Geo ----------
-        nullif(data ->> 'lat', '')::numeric    as lat,
-        nullif(data ->> 'lon', '')::numeric    as lon,
+        -- ---------- Geo (raw, validated below) ----------
+        nullif(data ->> 'lat', '')::numeric    as lat_raw,
+        nullif(data ->> 'lon', '')::numeric    as lon_raw,
 
         -- ---------- Relationship & status ----------
         -- registration_date: same multi-format treatment as date_of_birth.
@@ -125,11 +146,11 @@ flat as (
             else null
         end as registration_date,
 
-        (data ->> 'kyc_status')::text          as kyc_status,
+        (data ->> 'kyc_status')::text              as kyc_status,
         nullif(data ->> 'risk_score', '')::numeric as risk_score,
-        (data ->> 'customer_segment')::text    as customer_segment,
-        (data ->> 'relationship_manager')::text as relationship_manager,
-        (data ->> 'status')::text              as status,
+        (data ->> 'customer_segment')::text        as customer_segment,
+        (data ->> 'relationship_manager')::text    as relationship_manager,
+        (data ->> 'status')::text                  as status_raw,
 
         -- ---------- Audit ----------
         load_timestamp
@@ -142,23 +163,69 @@ flat as (
 enriched as (
 
     select
-        *,
+        -- ---------- Identity ----------
+        customer_id,
+        first_name,
+        last_name,
+        email,
+        phone_number,
 
+        -- ---------- Demographics ----------
+        date_of_birth,
         case
             when date_of_birth is null then null
             else extract(year from age(current_date, date_of_birth))::int
         end as age,
+        {{ age_bucket('date_of_birth') }} as age_bucket,
+
+        gender,
+        nationality,
+        city,
+        country,
+        address,
+
+        -- ---------- Geo (validated) ----------
+        -- Coordinates outside valid lat/lon ranges are nulled out and flagged.
+        case
+            when lat_raw is null or lon_raw is null then false
+            when lat_raw < -90  or lat_raw > 90     then false
+            when lon_raw < -180 or lon_raw > 180    then false
+            else true
+        end as is_geo_valid,
 
         case
-            when date_of_birth is null                                       then 'unknown'
-            when extract(year from age(current_date, date_of_birth)) < 18    then 'under_18'
-            when extract(year from age(current_date, date_of_birth)) < 25    then '18-24'
-            when extract(year from age(current_date, date_of_birth)) < 35    then '25-34'
-            when extract(year from age(current_date, date_of_birth)) < 45    then '35-44'
-            when extract(year from age(current_date, date_of_birth)) < 55    then '45-54'
-            when extract(year from age(current_date, date_of_birth)) < 65    then '55-64'
-            else '65_plus'
-        end as age_bucket
+            when lat_raw is null or lon_raw is null            then null
+            when lat_raw < -90 or lat_raw > 90                 then null
+            when lon_raw < -180 or lon_raw > 180               then null
+            else lat_raw
+        end as lat,
+
+        case
+            when lat_raw is null or lon_raw is null            then null
+            when lat_raw < -90 or lat_raw > 90                 then null
+            when lon_raw < -180 or lon_raw > 180               then null
+            else lon_raw
+        end as lon,
+
+        -- ---------- Relationship & status ----------
+        registration_date,
+        case
+            when registration_date is null then null
+            else (
+                extract(year  from age(current_date, registration_date)) * 12
+              + extract(month from age(current_date, registration_date))
+            )::int
+        end as tenure_months,
+        {{ tenure_bucket('registration_date') }} as tenure_bucket,
+
+        {{ normalize_kyc_status('kyc_status') }} as kyc_status,
+        risk_score,
+        {{ normalize_customer_segment('customer_segment') }} as customer_segment,
+        relationship_manager,
+        {{ normalize_customer_status('status_raw') }} as status,
+
+        -- ---------- Audit ----------
+        load_timestamp
 
     from flat
 
