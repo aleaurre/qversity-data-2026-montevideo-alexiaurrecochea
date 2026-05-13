@@ -92,27 +92,7 @@ flat as (
         (data ->> 'phone_number')::text        as phone_number,
 
         -- ---------- Demographics ----------
-        case
-            when data ->> 'date_of_birth' is null
-                 or data ->> 'date_of_birth' = ''
-                then null
-
-            when data ->> 'date_of_birth' ~ '^\d{4}-\d{2}-\d{2}$'
-                then (data ->> 'date_of_birth')::date
-
-            when data ->> 'date_of_birth' ~ '^\d{8}$'
-                then to_date(data ->> 'date_of_birth', 'YYYYMMDD')
-
-            -- Slash = DMY (LATAM).
-            when data ->> 'date_of_birth' ~ '^\d{2}/\d{2}/\d{4}$'
-                then to_date(data ->> 'date_of_birth', 'DD/MM/YYYY')
-
-            -- Dash = MDY (US). Confirmed by "06-13-2024" type rows.
-            when data ->> 'date_of_birth' ~ '^\d{2}-\d{2}-\d{4}$'
-                then to_date(data ->> 'date_of_birth', 'MM-DD-YYYY')
-
-            else null
-        end as date_of_birth,
+        {{ parse_date_multi_format("data ->> 'date_of_birth'") }} as date_of_birth,
 
         (data ->> 'gender')::text              as gender,
         (data ->> 'nationality')::text         as nationality,
@@ -126,25 +106,8 @@ flat as (
 
         -- ---------- Relationship & status ----------
         -- registration_date: same multi-format treatment as date_of_birth.
-        case
-            when data ->> 'registration_date' is null
-                 or data ->> 'registration_date' = ''
-                then null
-
-            when data ->> 'registration_date' ~ '^\d{4}-\d{2}-\d{2}$'
-                then (data ->> 'registration_date')::date
-
-            when data ->> 'registration_date' ~ '^\d{8}$'
-                then to_date(data ->> 'registration_date', 'YYYYMMDD')
-
-            when data ->> 'registration_date' ~ '^\d{2}/\d{2}/\d{4}$'
-                then to_date(data ->> 'registration_date', 'DD/MM/YYYY')
-
-            when data ->> 'registration_date' ~ '^\d{2}-\d{2}-\d{4}$'
-                then to_date(data ->> 'registration_date', 'MM-DD-YYYY')
-
-            else null
-        end as registration_date,
+        -- ---------- Relationship & status ----------
+        {{ parse_date_multi_format("data ->> 'registration_date'") }} as registration_date,
 
         (data ->> 'kyc_status')::text              as kyc_status,
         nullif(data ->> 'risk_score', '')::numeric as risk_score,
