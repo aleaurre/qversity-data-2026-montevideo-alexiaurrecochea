@@ -13,10 +13,26 @@ import os
 from pyspark.sql import SparkSession
 
 
+
 # Path absoluto al driver JDBC dentro del container de Airflow.
 # Lo dejamos como constante a nivel módulo porque es invariante del entorno
 # (lo fija el Dockerfile.airflow).
 JDBC_DRIVER_PATH = "/opt/spark/jars/postgresql-42.7.3.jar"
+
+
+# Target schema para los outputs raw de Spark. Vivido en Postgres bajo este
+# schema como tablas intermedias machine-written; dbt las consume como sources
+# y construye encima la silver "limpia" (views stg_*, tablas dim_*/fact_*).
+#
+# La separación de schemas es deliberada:
+#   - silver_raw: lo que escribe Spark (no consumido por BI ni por usuarios).
+#   - silver:     lo que escribe dbt (lo que evaluamos con tests, lo que
+#                 alimenta gold y eventualmente PowerBI).
+#
+# Se lee de la env var SPARK_TARGET_SCHEMA (set en .env, propagada por
+# docker-compose). El default 'silver_raw' garantiza que el script funcione
+# incluso si la env var no está set, evitando KeyError en dev.
+TARGET_SCHEMA = os.getenv("SPARK_TARGET_SCHEMA", "silver_raw")
 
 
 def get_spark_session(app_name: str = "qversity-spark") -> SparkSession:
