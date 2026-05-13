@@ -4,17 +4,17 @@
 
     The bronze dataset contains 20 surface variants of this field across
     those 4 canonical values:
-      - Casing chaos: 'Active', 'ACTIVE', 'active'
+      - Casing chaos: 'Active', 'ACTIVE', 'active' (collapsed by normalize_casing)
       - Spanish translations: 'activo', 'suspendido', 'cerrado', 'inactivo'
-      - Spanish + casing combined: 'ACTIVO', 'Suspendido', etc.
+        (mapped here)
 
     Strategy:
-      1. Lowercase + trim the input (collapses casing variants).
-      2. CASE-map the Spanish forms to their English canonical equivalents.
-      3. Anything not matching one of the 8 expected forms (4 EN + 4 ES)
-         passes through as the lowercased input. The accepted_values test
-         in schema.yml will then catch any unexpected residue and fail
-         loudly — that's intentional: silent fallthroughs hide bugs.
+      1. normalize_casing collapses casing variants to lowercase+trim.
+      2. CASE-map the resulting Spanish forms to English canonicals.
+      3. Anything else passes through the lowercased value. The
+         accepted_values test in schema.yml then catches unexpected
+         residue and fails loudly — that's intentional: silent
+         fallthroughs hide bugs.
 
     Usage:
         select {{ normalize_customer_status('status') }} as status
@@ -22,11 +22,11 @@
 #}
 
 {% macro normalize_customer_status(column_name) %}
-    case lower(trim({{ column_name }}))
+    case {{ normalize_casing(column_name) }}
         when 'activo'     then 'active'
         when 'inactivo'   then 'inactive'
         when 'suspendido' then 'suspended'
         when 'cerrado'    then 'closed'
-        else lower(trim({{ column_name }}))
+        else {{ normalize_casing(column_name) }}
     end
 {% endmacro %}
