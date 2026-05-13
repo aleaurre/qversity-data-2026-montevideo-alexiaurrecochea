@@ -1,0 +1,92 @@
+version: 2
+
+# Tests for staging models in the silver layer.
+#
+# Convention: this file holds tests for stg_* models — thin views over
+# Spark outputs (or bronze jsonb) whose role is to expose normalized,
+# typed data to the dimensional/fact models downstream. Dimension and
+# fact model tests live in _silver__dim.yml and _silver__fact.yml.
+#
+# Test coverage strategy for staging:
+#   - PK uniqueness + not_null on identity fields.
+#   - Referential integrity to upstream dimensions (e.g. customer_id).
+#   - accepted_values on every normalized categorical, asserting the
+#     normalization macros work correctly. If a macro fails to map a
+#     variant, the test catches it here, before downstream models
+#     consume bad data.
+
+models:
+
+  - name: stg_accounts
+    description: >
+      One row per account. View over silver_staging.stg_accounts (spark
+      output) with defensive trim, status/account_type normalization, and
+      uppercase currency.
+    columns:
+
+      - name: account_id
+        description: Business key for the account.
+        tests:
+          - unique
+          - not_null
+
+      - name: customer_id
+        description: FK to dim_customer. Every account belongs to a customer.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+
+      - name: account_type
+        description: >
+          Normalized via normalize_casing. Canonical lowercase values:
+          savings, checking, investment, credit_card.
+        tests:
+          - not_null
+          - accepted_values:
+              # Source: Qversity spec §3.3 nested array - accounts[].
+              values: ['savings', 'checking', 'investment', 'credit_card']
+
+      - name: currency
+        description: >
+          ISO 4217 currency code, uppercase. 8 currencies observed:
+          USD plus the 7 LATAM currencies (ARS, BRL, CLP, COP, MXN, PEN, UYU).
+          USD represents ~50% of accounts, reflecting documented
+          dollarization patterns in LATAM banking.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['USD', 'ARS', 'BRL', 'CLP', 'COP', 'MXN', 'PEN', 'UYU']
+
+      - name: status
+        description: >
+          Normalized via normalize_account_status. Canonical lowercase
+          values: active, frozen, closed.
+
+          NOTE: This is a documented spec divergence. The Qversity brief
+          lists `active / inactive / suspended / closed` for account status,
+          but the actual dataset contains `active / frozen / closed` only.
+          The accepted_values test reflects observed data, not the spec.
+          See decisions.md.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['active', 'frozen', 'closed']
+
+      - name: balance
+        description: >
+          Account balance (raw numeric). May be negative for credit cards.
+          486 records (~2.8%) have NULL balance — distributed uniformly across
+          all account_types. This is documented data quality issue from the
+          generator, not a parsing bug. Tested as warn (not error) so it
+          surfaces in test output without blocking dbt build.
+        tests:
+          - not_null:
+              config:
+                severity: warn
+
+      - name: opened_date
+        description: Date the account was opened. Already parsed to date by Spark.
+        tests:
+          - not_null

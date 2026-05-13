@@ -38,10 +38,10 @@ sources:
 
   - name: silver_staging
     description: >
-      Output of the PySpark flatteners. These tables have already had their
-      arrays exploded and PK deduplication applied; dbt's job is to clean
-      types, normalize categories, and build dimensional models on top.
-    schema: silver
+      Output of the PySpark flatteners. Tables live in schema `silver_raw`
+      (intermediate, machine-written). dbt's stg_* models read from here
+      and write back to schema `silver` as views.
+    schema: silver_raw
     tables:
       - name: stg_accounts
         description: One row per (customer, account). Produced by spark/flatten_accounts.py.
