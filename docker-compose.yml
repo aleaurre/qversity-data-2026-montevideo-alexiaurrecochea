@@ -16,6 +16,7 @@ x-airflow-common: &airflow-common
     POSTGRES_DB: ${POSTGRES_DB}
     POSTGRES_HOST: ${POSTGRES_HOST}
     POSTGRES_PORT: ${POSTGRES_PORT}
+    SPARK_TARGET_SCHEMA: ${SPARK_TARGET_SCHEMA}
   volumes:
     - ./dags:/opt/airflow/dags
     - ./spark:/opt/airflow/spark
