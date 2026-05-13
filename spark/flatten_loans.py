@@ -2,11 +2,12 @@
 Flatten del array `loans[]` desde bronze hacia silver.
 
 Lee `bronze.raw_fintech_data` (jsonb), expande el array `data.loans`
-(0-3 elementos por customer) y escribe el resultado en `silver.stg_loans`.
+(0-3 elementos por customer) y escribe el resultado en
+`<TARGET_SCHEMA>.stg_loans` (típicamente `silver_raw.stg_loans`).
 
 Cada fila de salida representa UN préstamo. Customers sin préstamos NO
-aparecen en esta tabla — esto es intencional: `silver.stg_loans` es una
-tabla de hechos de préstamos, no una tabla de "customer × loan_status".
+aparecen en esta tabla — esto es intencional: es una tabla de hechos
+de préstamos, no una tabla de "customer × loan_status".
 
 Si en gold/dbt necesitamos métricas tipo "% de customers con loan", eso
 se resuelve con un LEFT JOIN desde `dim_customers` hacia esta tabla, que
@@ -21,7 +22,7 @@ from __future__ import annotations
 import sys
 
 from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql.functions import col, explode, from_json, length, to_date, trim, when
+from pyspark.sql.functions import col, explode, from_json, length, trim, when
 from pyspark.sql.types import (
     ArrayType,
     DoubleType,
@@ -31,7 +32,7 @@ from pyspark.sql.types import (
     StructType,
 )
 
-from utils import deduplicate_by_pk, get_jdbc_config, get_spark_session
+from utils import deduplicate_by_pk, get_jdbc_config, get_spark_session, TARGET_SCHEMA
 
 
 # Schema explícito del array `loans[]`.
@@ -120,8 +121,8 @@ def flatten_loans(bronze_df: DataFrame) -> DataFrame:
         col("loan.interest_rate").alias("interest_rate"),
         col("loan.term_months").alias("term_months"),
         col("loan.monthly_payment").alias("monthly_payment"),
-        to_date(col("loan.start_date"), "yyyy-MM-dd").alias("start_date"),
-        to_date(col("loan.end_date"), "yyyy-MM-dd").alias("end_date"),
+        col("loan.start_date").alias("start_date"),
+        col("loan.end_date").alias("end_date"),
         col("loan.status").alias("status"),
         col("loan.days_past_due").alias("days_past_due"),
         col("loan.collateral_type").alias("collateral_type"),
@@ -146,12 +147,12 @@ def flatten_loans(bronze_df: DataFrame) -> DataFrame:
 
 
 def write_silver(df: DataFrame, jdbc: dict) -> None:
-    """Escribe a silver.stg_loans con overwrite + truncate."""
+    """Escribe a <TARGET_SCHEMA>.stg_loans con overwrite + truncate."""
     (
         df.write
         .format("jdbc")
         .option("url", jdbc["url"])
-        .option("dbtable", "silver.stg_loans")
+        .option("dbtable", f"{TARGET_SCHEMA}.stg_loans")
         .option("user", jdbc["properties"]["user"])
         .option("password", jdbc["properties"]["password"])
         .option("driver", jdbc["properties"]["driver"])
@@ -183,7 +184,7 @@ def main() -> int:
         print(f"[flatten_loans] duplicates dropped: {dropped}")
 
         write_silver(deduped, jdbc)
-        print(f"[flatten_loans] wrote {final_count} rows to silver.stg_loans")
+        print(f"[flatten_loans] wrote {final_count} rows to {TARGET_SCHEMA}.stg_loans")
 
         return 0
     except Exception as e:

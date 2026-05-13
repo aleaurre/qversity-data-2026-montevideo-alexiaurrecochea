@@ -2,7 +2,8 @@
 Flatten del array `accounts[]` desde bronze hacia silver.
 
 Lee `bronze.raw_fintech_data` (jsonb), expande el array `data.accounts`
-(2-5 elementos por customer), y escribe el resultado en `silver.stg_accounts`.
+(2-5 elementos por customer), y escribe el resultado en
+`<TARGET_SCHEMA>.stg_accounts` (típicamente `silver_raw.stg_accounts`).
 
 Cada fila de salida representa UNA cuenta. El `customer_id` se propaga desde
 el record padre para mantener la FK con la futura `dim_customer`.
@@ -13,7 +14,7 @@ from __future__ import annotations
 import sys
 
 from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql.functions import col, explode, to_date, to_timestamp
+from pyspark.sql.functions import col, explode
 from pyspark.sql.types import (
     StringType,
     StructField,
@@ -23,7 +24,7 @@ from pyspark.sql.types import (
 
 # Importamos desde el mismo directorio. spark-submit agrega el dir del script
 # al sys.path automáticamente, así que `from utils import ...` funciona.
-from utils import get_spark_session, get_jdbc_config
+from utils import get_spark_session, get_jdbc_config, deduplicate_by_pk, TARGET_SCHEMA
 
 
 # Schema explícito del array `accounts[]`.
@@ -112,7 +113,7 @@ def flatten_accounts(bronze_df: DataFrame) -> DataFrame:
         col("acct.balance").alias("balance"),
         col("acct.credit_limit").alias("credit_limit"),
         col("acct.interest_rate").alias("interest_rate"),
-        to_date(col("acct.opened_date"), "yyyy-MM-dd").alias("opened_date"),
+        col("acct.opened_date").alias("opened_date"),
         col("acct.status").alias("status"),
         col("acct.branch_code").alias("branch_code"),
         col("bronze_id"),
@@ -136,56 +137,10 @@ def flatten_accounts(bronze_df: DataFrame) -> DataFrame:
 
     return flat
 
-# ---------------------------------------------------------------------------
-# Dedup helper — shared by all flatteners.
-#
-# Centralizamos la lógica de dedup para no repetir el window function en
-# cada script. Cada flattener llama a esto con su PK natural:
-#   - flatten_accounts.py     → "account_id"
-#   - flatten_transactions.py → "transaction_id"
-#   - flatten_loans.py        → "loan_id"
-#
-# Criterio: si bronze tiene múltiples loads del mismo dataset (cosa esperable
-# en desarrollo, donde el DAG corre varias veces), la misma PK del array
-# puede aparecer en más de un `bronze_id`. Nos quedamos con la versión MÁS
-# RECIENTE — mayor `load_timestamp` — que es la semántica correcta para un
-# staging que alimenta silver/dbt.
-#
-# Casos degenerados:
-#   - dos versiones con el mismo load_timestamp (DAG corrió dos veces en el
-#     mismo segundo): Spark elige una arbitrariamente. No es determinista
-#     pero los datos son idénticos en ese caso, así que da igual.
-#   - PK nula: row_number() la trata como un grupo aparte y la conserva.
-#     No filtramos nulls acá; si aparecen, es un bug de upstream que dbt
-#     debe atrapar con un test not_null.
-# ---------------------------------------------------------------------------
-def deduplicate_by_pk(df, pk_column: str):
-    """
-    Deduplica un DataFrame staging por su PK natural, quedándose con la
-    versión de mayor `load_timestamp`.
-
-    Args:
-        df: DataFrame con columnas `pk_column` y `load_timestamp`.
-        pk_column: nombre de la PK natural del array (ej: "account_id").
-
-    Returns:
-        DataFrame con una fila por valor único de `pk_column`.
-    """
-    from pyspark.sql.window import Window
-    from pyspark.sql.functions import col, row_number
-
-    w = Window.partitionBy(pk_column).orderBy(col("load_timestamp").desc())
-
-    return (
-        df.withColumn("_rn", row_number().over(w))
-          .filter(col("_rn") == 1)
-          .drop("_rn")
-    )
-
 
 def write_silver(df: DataFrame, jdbc: dict) -> None:
     """
-    Escribe a silver.stg_accounts en modo overwrite.
+    Escribe a <TARGET_SCHEMA>.stg_accounts en modo overwrite.
 
     `mode=overwrite` es lo correcto para una staging table: el contrato es
     "esto refleja la última vista de bronze". Si un día queremos historiar
@@ -199,7 +154,7 @@ def write_silver(df: DataFrame, jdbc: dict) -> None:
         df.write
         .format("jdbc")
         .option("url", jdbc["url"])
-        .option("dbtable", "silver.stg_accounts")
+        .option("dbtable", f"{TARGET_SCHEMA}.stg_accounts")
         .option("user", jdbc["properties"]["user"])
         .option("password", jdbc["properties"]["password"])
         .option("driver", jdbc["properties"]["driver"])
@@ -229,7 +184,7 @@ def main() -> int:
         print(f"[flatten_accounts] accounts after dedup: {final_count}")
 
         write_silver(deduped, jdbc)
-        print(f"[flatten_accounts] wrote {final_count} rows to silver.stg_accounts")
+        print(f"[flatten_accounts] wrote {final_count} rows to {TARGET_SCHEMA}.stg_accounts")
 
         return 0
     except Exception as e:

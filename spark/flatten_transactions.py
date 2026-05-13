@@ -3,7 +3,8 @@ Flatten del array `transactions[]` desde bronze hacia silver.
 
 Lee `bronze.raw_fintech_data` (jsonb), expande el array `data.transactions`
 (5-30 elementos por customer → ~75k-150k filas para 5k customers), y escribe
-el resultado en `silver.stg_transactions`.
+el resultado en `<TARGET_SCHEMA>.stg_transactions` (típicamente
+`silver_raw.stg_transactions`).
 
 Cada fila de salida representa UNA transacción. Propagamos `customer_id`
 desde el record padre para mantener la relación con la futura `dim_customer`.
@@ -16,7 +17,7 @@ from __future__ import annotations
 import sys
 
 from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql.functions import col, explode, from_json, length, to_date, trim, when
+from pyspark.sql.functions import col, explode, from_json, length, trim, when
 from pyspark.sql.types import (
     ArrayType,
     DoubleType,
@@ -25,7 +26,7 @@ from pyspark.sql.types import (
     StructType,
 )
 
-from utils import deduplicate_by_pk, get_jdbc_config, get_spark_session
+from utils import deduplicate_by_pk, get_jdbc_config, get_spark_session, TARGET_SCHEMA
 
 
 # Schema explícito del array `transactions[]`.
@@ -119,7 +120,7 @@ def flatten_transactions(bronze_df: DataFrame) -> DataFrame:
         col("customer_id"),
         col("tx.transaction_id").alias("transaction_id"),
         col("tx.account_id").alias("account_id"),
-        to_date(col("tx.date"), "yyyy-MM-dd").alias("transaction_date"),
+        col("tx.date").alias("transaction_date"),
         col("tx.amount").alias("amount"),
         col("tx.currency").alias("currency"),
         col("tx.type").alias("transaction_type"),
@@ -155,7 +156,7 @@ def flatten_transactions(bronze_df: DataFrame) -> DataFrame:
 
 def write_silver(df: DataFrame, jdbc: dict) -> None:
     """
-    Escribe a silver.stg_transactions en modo overwrite con truncate=true.
+    Escribe a <TARGET_SCHEMA>.stg_transactions en modo overwrite con truncate=true.
 
     Mismo razonamiento que en flatten_accounts: staging refleja la última
     vista de bronze, y truncate preserva permisos/constraints que dbt o
@@ -165,7 +166,7 @@ def write_silver(df: DataFrame, jdbc: dict) -> None:
         df.write
         .format("jdbc")
         .option("url", jdbc["url"])
-        .option("dbtable", "silver.stg_transactions")
+        .option("dbtable", f"{TARGET_SCHEMA}.stg_transactions")
         .option("user", jdbc["properties"]["user"])
         .option("password", jdbc["properties"]["password"])
         .option("driver", jdbc["properties"]["driver"])
@@ -197,7 +198,7 @@ def main() -> int:
         print(f"[flatten_transactions] duplicates dropped: {dropped}")
 
         write_silver(deduped, jdbc)
-        print(f"[flatten_transactions] wrote {final_count} rows to silver.stg_transactions")
+        print(f"[flatten_transactions] wrote {final_count} rows to {TARGET_SCHEMA}.stg_transactions")
 
         return 0
     except Exception as e:
