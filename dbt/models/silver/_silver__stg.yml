@@ -373,3 +373,224 @@ models:
     tests:
       - dbt_utils.expression_is_true:
           expression: "avg_monthly_logins is null or avg_monthly_logins >= 0"
+  
+  - name: dim_date
+    description: >
+      Calendar dimension generated from 2015-01-01 to 2030-12-31. Materialized
+      as a table because every gold time-based mart joins to it. Includes
+      year/quarter/month/week attributes, day-of-week, sortable integer keys
+      for PowerBI, and start-of-period anchors for rolling aggregations.
+    columns:
+
+      - name: date_day
+        description: Calendar date. Primary key.
+        tests:
+          - unique
+          - not_null
+
+      - name: year
+        description: Year as integer (e.g., 2026).
+        tests:
+          - not_null
+
+      - name: quarter
+        description: Quarter of year (1-4).
+        tests:
+          - not_null
+          - accepted_values:
+              values: [1, 2, 3, 4]
+              quote: false
+
+      - name: month
+        description: Month of year (1-12).
+        tests:
+          - not_null
+          - accepted_values:
+              values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+              quote: false
+
+      - name: day_of_week_num
+        description: Day of week (0=Sunday, 6=Saturday).
+        tests:
+          - not_null
+          - accepted_values:
+              values: [0, 1, 2, 3, 4, 5, 6]
+              quote: false
+
+      - name: is_weekend
+        description: True if Saturday or Sunday.
+        tests:
+          - not_null
+
+      - name: year_month_key
+        description: >
+          Sortable integer key in YYYYMM format (e.g., 202601). Used as
+          PowerBI's sort-by-column for month labels.
+        tests:
+          - not_null
+
+  - name: dim_account
+    description: >
+      Account dimension. One row per account. Inherits normalization from
+      stg_accounts and adds account_age_months as a derived attribute.
+      Customer attributes NOT denormalized here (joined in gold via customer_id).
+    columns:
+
+      - name: account_id
+        description: PK. Business key for the account.
+        tests:
+          - unique
+          - not_null
+
+      - name: customer_id
+        description: FK to dim_customer.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+
+      - name: account_type
+        description: >
+          Canonical lowercase values: savings, checking, investment, credit_card.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['savings', 'checking', 'investment', 'credit_card']
+
+      - name: status
+        description: >
+          Canonical lowercase values: active, frozen, closed (per spec divergence
+          documented in stg_accounts).
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['active', 'frozen', 'closed']
+
+      - name: currency
+        description: ISO 4217 currency code, uppercase.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['USD', 'ARS', 'BRL', 'CLP', 'COP', 'MXN', 'PEN', 'UYU']
+
+      - name: opened_date
+        description: >
+          Account opening date, parsed by stg_accounts via the multi-format
+          macro. May be null if the date string was unparseable.
+
+      - name: account_age_months
+        description: >
+          Months elapsed since opened_date as of run time. Null when
+          opened_date is null. Used for cohort analysis and tenure-based
+          segmentation in gold.
+
+  - name: dim_loan
+    description: >
+      Loan dimension. One row per loan. Inherits normalization from
+      stg_loans and adds derived attributes: loan_age_months,
+      remaining_term_months, principal_repaid, principal_repaid_pct.
+      Customer attributes NOT denormalized (joined in gold via customer_id).
+    columns:
+
+      - name: loan_id
+        description: PK. Business key for the loan.
+        tests:
+          - unique
+          - not_null
+
+      - name: customer_id
+        description: FK to dim_customer.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+
+      - name: loan_type
+        description: >
+          Canonical lowercase values: personal, mortgage, auto, education,
+          business.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['personal', 'mortgage', 'auto', 'education', 'business']
+
+      - name: status
+        description: >
+          Canonical lowercase values: current, delinquent, default, paid_off.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['current', 'delinquent', 'default', 'paid_off']
+
+      - name: currency
+        description: ISO 4217 currency code, uppercase.
+        tests:
+          - not_null
+
+      - name: days_past_due
+        description: Days overdue. 0 = current; positive = in arrears.
+        tests:
+          - not_null
+
+      - name: principal_repaid_pct
+        description: >
+          Percentage of principal paid down. NULL if principal is NULL
+          or 0. Useful for analytical aggregations of loan portfolio health.
+
+    tests:
+      # Sanity: outstanding_balance should never exceed principal.
+      # If it does, it's likely a data quality issue (interest accrued?
+      # generator bug?) worth surfacing.
+      - dbt_utils.expression_is_true:
+          expression: >
+            principal is null
+            or outstanding_balance is null
+            or outstanding_balance <= principal
+          config:
+            severity: warn
+
+  - name: dim_geography
+    description: >
+      Geography lookup dimension. Hard-coded with the 7 LATAM countries
+      per the project spec. Provides country name and default currency
+      for join with stg_accounts.currency in gold marts.
+      
+      Does NOT include city (data quality issues in dim_customer.city
+      documented in decisions.md). Does NOT include customer counts
+      (aggregates live in gold).
+    columns:
+
+      - name: country_code
+        description: ISO country code. Primary key.
+        tests:
+          - unique
+          - not_null
+          - accepted_values:
+              values: ['CO', 'UY', 'AR', 'MX', 'CL', 'PE', 'BR']
+
+      - name: country_name
+        description: Human-readable country name.
+        tests:
+          - unique
+          - not_null
+
+      - name: region
+        description: >
+          Macro-region. Currently always 'LATAM'. Column exists for
+          future extensibility.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['LATAM']
+
+      - name: default_currency
+        description: >
+          Default local currency for the country (ISO 4217). Used to
+          identify "local currency accounts" vs USD/foreign currency
+          accounts in gold marts.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['COP', 'UYU', 'ARS', 'MXN', 'CLP', 'PEN', 'BRL']
