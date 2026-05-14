@@ -1,0 +1,168 @@
+version: 2
+
+models:
+  - name: fct_transactions
+    description: |
+      Fact table: una fila por transacción.
+      Promoción de stg_transactions con materialización table y FKs testeadas.
+      Derivaciones sintácticas: is_failed, day_of_week. Resto de derivaciones
+      de negocio (revenue, signed amounts) se calculan en gold.
+    columns:
+      - name: transaction_id
+        description: PK de la transacción.
+        tests:
+          - unique
+          - not_null
+
+      - name: customer_id
+        description: FK a dim_customer. 0 orphans confirmados en day 7.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+
+      - name: account_id
+        description: FK a dim_account. 0 orphans confirmados en day 7.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_account')
+              field: account_id
+
+      - name: transaction_date
+        description: Fecha de la transacción, ya parseada en stg_transactions.
+        tests:
+          - not_null
+
+      - name: amount
+        description: |
+          Monto de la transacción. NO normalizado por currency (sin conversión FX
+          en silver — se difiere a gold si fuera necesario).
+        # Sin test not_null: el dataset tiene ~3% de amounts NULL (DQ del generator,
+        # documentado en decisions.md día 6). Si se quisiera test severity=warn,
+        # agregar acá; por ahora dejamos sin test.
+
+      - name: currency
+        description: Moneda de la transacción. ISO 4217.
+        tests:
+          - not_null
+
+      - name: transaction_type
+        description: Tipo de transacción. Normalizado en stg_transactions vía macro.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['deposit', 'withdrawal', 'transfer', 'payment', 'refund', 'fee']
+
+      - name: channel
+        description: Canal por el que se realizó la transacción.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['mobile', 'web', 'atm', 'branch', 'pos']
+
+      - name: status
+        description: Estado de la transacción.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['completed', 'pending', 'failed', 'reversed']
+
+      - name: is_failed
+        description: |
+          True si status = 'failed' estricto. Excluye pending (incompleta) y
+          reversed (completada+revertida). Pensado para BQ 18.
+        tests:
+          - not_null
+
+      - name: day_of_week
+        description: |
+          Día de la semana extraído de transaction_date (Postgres DOW:
+          domingo=0, sábado=6). Pensado para BQ 16.
+        tests:
+          - not_null
+
+  - name: fct_loans
+    description: |
+      Fact table: una fila por loan. Métricas financieras (principal, outstanding,
+      interest_rate) viven acá; descriptores como loan_type se replican para
+      facilitar agregaciones directas sobre el fact sin join obligatorio a dim_loan.
+    columns:
+      - name: loan_id
+        description: PK del loan.
+        tests:
+          - unique
+          - not_null
+
+      - name: customer_id
+        description: FK a dim_customer. 0 orphans confirmados en day 7.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+
+      - name: loan_type
+        description: Tipo de loan. Normalizado en stg_loans vía macro.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['personal', 'mortgage', 'auto', 'education', 'business']
+
+      - name: status
+        description: |
+          Estado del loan. Las definiciones de delinquency derivada (combinando
+          status con days_past_due) se calculan en gold.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['current', 'delinquent', 'default', 'paid_off']
+
+      - name: currency
+        description: Moneda del loan. ISO 4217.
+        tests:
+          - not_null
+
+      - name: principal
+        description: |
+          Monto original del loan. ~2.8% de loans tienen principal NULL en bronze
+          (DQ del generator, mismo patrón que stg_accounts.balance y
+          stg_transactions.amount documentado en decisions.md día 6).
+          Test severity=warn: visible pero no bloquea build.
+        tests:
+          - not_null:
+              severity: warn
+
+      - name: outstanding_balance
+        description: |
+          Balance pendiente del loan. ~2.9% de loans tienen outstanding_balance NULL
+          en bronze (DQ del generator). Test severity=warn.
+        tests:
+          - not_null:
+              severity: warn
+
+      - name: interest_rate
+        description: |
+          Tasa de interés anual. Puede tener NULLs por DQ del generator.
+          Test severity=warn.
+        tests:
+          - not_null:
+              severity: warn
+
+      - name: days_past_due
+        description: Días de atraso en el pago.
+        tests:
+          - not_null
+
+      - name: start_date
+        description: Fecha de inicio del loan.
+        tests:
+          - not_null
+
+      - name: end_date
+        description: Fecha de fin del loan (proyectada según term_months).
+        tests:
+          - not_null
+
+          
