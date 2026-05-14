@@ -243,10 +243,44 @@ models:
           - not_null
 
       - name: principal
-        description: Original loan amount.
+        description: >
+          Original loan amount. 215 records (~2.8%) have NULL principal —
+          distributed independently from outstanding_balance and monthly_payment
+          (only 3 records have multiple numeric fields NULL simultaneously).
+          Documented data quality issue from the generator, not a parsing bug.
+          Tested as warn so it surfaces in test output without blocking dbt build.
+        tests:
+          - not_null:
+              config:
+                severity: warn
 
       - name: outstanding_balance
-        description: Remaining balance owed.
+        description: >
+          Remaining balance owed. 219 records (~2.9%) have NULL — same DQ
+          pattern as principal, independent NULL distribution. Tested as warn.
+        tests:
+          - not_null:
+              config:
+                severity: warn
+
+      - name: monthly_payment
+        description: >
+          Monthly installment amount. 224 records (~2.9%) have NULL — same DQ
+          pattern as principal and outstanding_balance, NULLs distributed
+          independently per field. Tested as warn.
+        tests:
+          - not_null:
+              config:
+                severity: warn
+
+      - name: interest_rate
+        description: >
+          Annual interest rate. 0 NULLs confirmed in bronze — this field is
+          clean from the generator, unlike principal/outstanding_balance/
+          monthly_payment which have ~2.9% NULL each. Tested with severity=error
+          as a regression guard.
+        tests:
+          - not_null
 
       - name: days_past_due
         description: Days overdue. 0 = current, positive = in arrears.
