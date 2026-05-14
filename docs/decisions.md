@@ -849,3 +849,122 @@ because of a bug in our code), warn lets the issue stay visible in
 `dbt test` output while keeping the pipeline runnable. If the dataset is
 ever refreshed and the NULL rate changes significantly, we'll see it
 in the warn count.
+
+## Day 6 (continued) — Staging models, dimensions, and aggregate
+
+### Macro architecture: normalize_casing + entity-specific specifics
+
+Adopted "Option C" macro hierarchy:
+- `normalize_casing(col)` — base macro doing `lower(trim(col))`.
+- `normalize_<entity>_<field>(col)` — thin or rich wrappers using the base.
+
+Thin wrappers (just delegate to normalize_casing): `normalize_kyc_status`,
+`normalize_transaction_status`, `normalize_loan_status`, `normalize_loan_type`.
+These exist for naming consistency: call sites read as
+`{{ normalize_kyc_status(...) }}` (intent-revealing) rather than
+`{{ normalize_casing(...) }}` (generic).
+
+Rich wrappers (lowercase + Spanish-to-English mapping):
+`normalize_customer_status`, `normalize_customer_segment`,
+`normalize_account_status`, `normalize_transaction_type`,
+`normalize_transaction_category`, `normalize_collateral_type`.
+
+For `account_type` and `transaction.channel`, `normalize_casing` is applied
+inline in the model (no dedicated macro) because the field has only casing
+variants and creating a macro for a one-liner would be ritualistic.
+
+### Schema separation: silver_raw (Spark) vs silver (dbt)
+
+Day 6 discovered a name collision: Spark wrote to `silver.stg_accounts` and
+dbt tried to create a view at the same fully-qualified name. dbt silently
+failed to materialize, causing tests to run against the raw Spark output
+instead of the normalized view.
+
+Fix: introduced `silver_raw` schema for Spark outputs. dbt reads from
+`silver_raw.stg_*` (declared as source) and writes views/tables to `silver`.
+
+Implementation:
+- Added `SPARK_TARGET_SCHEMA` env var to `.env`, `env.example`, `docker-compose.yml`.
+- Created `TARGET_SCHEMA` constant in `spark/utils.py` reading from env.
+- Updated 3 Spark flatten scripts to use `f"{TARGET_SCHEMA}.stg_<name>"`.
+- Updated `dbt/models/sources.yml`: `schema: silver_raw`.
+- Migrated existing tables with `ALTER TABLE ... SET SCHEMA silver_raw`.
+
+The default value `silver_raw` is hardcoded in `utils.py` so the script
+works even if the env var is missing; the env var allows overriding for
+test environments or future production deployments.
+
+### Date parsing centralization
+
+Spark's `to_date("yyyy-MM-dd")` silently NULL-ed any non-ISO date. EDA
+discovered 4 formats in date fields across the dataset:
+- ISO (~91%): `2026-05-08`
+- Compact (~3%): `20260613`
+- Slash DMY (~3%): `26/04/2026`
+- Dash MDY (~3%): `06-13-2024`
+
+Decision: Spark passes dates as text; dbt's `parse_date_multi_format` macro
+handles all 4 formats. Rationale: choosing which formats are valid is a
+semantic decision, not a syntactic one. Per the responsibility split, dbt
+owns it.
+
+Used by: `dim_customer` (date_of_birth, registration_date), `stg_accounts`
+(opened_date), `stg_transactions` (transaction_date), `stg_loans`
+(start_date, end_date).
+
+### Generalized data quality patterns
+
+Day 6 confirmed and extended the generator's data quality patterns:
+- **Casing chaos + Spanish translations** affect every categorical field
+  (customer.status, customer.kyc_status, customer.customer_segment,
+  account.status, transaction.type, transaction.status, transaction.category,
+  loan.status, loan.type, loan.collateral_type, digital_engagement.preferred_channel).
+- **Missing markers as strings** (`''`, `'NA'`, `'N/A'`, `'null'`, `'NULL'`)
+  appear in text categoricals AND in numeric fields. The `safe_cast_numeric`
+  macro NULL-s all 5 markers before casting.
+- **Non-parseable numeric strings** (`'$78.26'`, `'89.5 USD'`, `'83,5'`)
+  appear in 38 records of utilization_pct (0.4%). The safe_cast_numeric
+  macro returns NULL for any string not matching `^-?[0-9]+\.?[0-9]*$`.
+- **Out-of-range sentinels** in credit_score (~10%): values like 999999, 0,
+  negatives. Handled via the raw + flag + validated pattern.
+
+### Raw + flag + validated pattern
+
+Applied consistently for fields with genuine data quality issues that
+cannot be cleanly recovered:
+- `dim_customer.lat/lon` + `is_geo_valid` (6.8% invalid coordinates).
+- `stg_credit_info.credit_score_raw` + `is_credit_score_valid` + `credit_score` (10% out of range).
+- `stg_credit_info.utilization_pct_raw` + `is_utilization_pct_valid` + `utilization_pct` (0.4% unparseable + range issues).
+
+The pattern preserves the original value for audit, exposes a boolean for
+filtering, and provides a NULL-ed validated version for aggregations.
+
+### EUR currency in transactions
+
+Transactions contain ~1% of activity in EUR (924 rows). EUR is NOT present
+in accounts. Likely cross-border activity. Documented in stg_transactions
+yaml; relevant for business question 19 (international transfer patterns).
+
+### Tests configured as `warn` for documented data quality issues
+
+- `stg_accounts.balance` — 486 NULLs (2.8%), uniformly distributed.
+- `stg_transactions.amount` — 2619 NULLs (3.0%), uniformly distributed.
+
+Both are generator data quality, not parsing or join issues. Warn surfaces
+them without blocking the build.
+
+### customer_summary moved from gold to silver as agg_customer_activity
+
+Originally created in a prior session as gold.customer_summary. On
+reflection during day 6, its grain (1 row per customer) and contents
+(activity counts) fit a silver aggregate, not a business mart. Renamed
+to agg_customer_activity in silver. Old gold model dropped (file deleted,
+Postgres table dropped via CASCADE).
+
+### dim_geography is hardcoded, not derived
+
+7 countries from the spec (CO, UY, AR, MX, CL, PE, BR), implemented with
+`VALUES` in the model. Region is hardcoded as 'LATAM' for future
+extensibility. City is NOT in this dimension because of typos in
+dim_customer.city (e.g., 'Lma' for 'Lima'); customer.city can be used
+directly when needed.
