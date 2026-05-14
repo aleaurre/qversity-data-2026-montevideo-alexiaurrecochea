@@ -968,3 +968,8 @@ Postgres table dropped via CASCADE).
 extensibility. City is NOT in this dimension because of typos in
 dim_customer.city (e.g., 'Lma' for 'Lima'); customer.city can be used
 directly when needed.
+
+
+git tag -a v0.2.0-silver -m "Silver layer complete: PySpark flattening + dbt cleaning, dimensions, facts, 160 tests passing (7 warns documented as generator DQ)"
+git push origin main
+git push origin v0.2.0-silver
