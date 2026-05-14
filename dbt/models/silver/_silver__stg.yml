@@ -50,14 +50,15 @@ models:
 
       - name: currency
         description: >
-          ISO 4217 currency code, uppercase. 8 currencies observed:
-          USD plus the 7 LATAM currencies (ARS, BRL, CLP, COP, MXN, PEN, UYU).
-          USD represents ~50% of accounts, reflecting documented
-          dollarization patterns in LATAM banking.
+          ISO 4217 currency code, uppercase. 9 currencies observed in
+          transactions: USD + 7 LATAM + EUR. EUR represents ~1% of
+          transactions and is NOT present in stg_accounts — suggests
+          cross-border transfer activity (relevant for business question
+          19 on international transfer patterns).
         tests:
           - not_null
           - accepted_values:
-              values: ['USD', 'ARS', 'BRL', 'CLP', 'COP', 'MXN', 'PEN', 'UYU']
+              values: ['USD', 'ARS', 'BRL', 'CLP', 'COP', 'MXN', 'PEN', 'UYU', 'EUR']
 
       - name: status
         description: >
@@ -90,3 +91,285 @@ models:
         description: Date the account was opened. Already parsed to date by Spark.
         tests:
           - not_null
+
+  - name: stg_transactions
+    description: >
+      One row per transaction. View over silver_raw.stg_transactions (spark
+      output) with defensive trim, status/type/category/channel normalization,
+      uppercase currency, and multi-format date parsing.
+    columns:
+
+      - name: transaction_id
+        description: Business key for the transaction.
+        tests:
+          - unique
+          - not_null
+
+      - name: customer_id
+        description: FK to dim_customer.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+
+      - name: account_id
+        description: >
+          FK to stg_accounts. Every transaction belongs to an account.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_accounts')
+              field: account_id
+
+      - name: transaction_type
+        description: >
+          Normalized via normalize_transaction_type. Canonical lowercase
+          values: deposit, withdrawal, transfer, payment, refund, fee.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['deposit', 'withdrawal', 'transfer', 'payment', 'refund', 'fee']
+
+      - name: status
+        description: >
+          Normalized via normalize_transaction_status. Canonical lowercase
+          values: completed, pending, failed, reversed.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['completed', 'pending', 'failed', 'reversed']
+
+      - name: channel
+        description: >
+          Normalized via normalize_casing (only casing variants observed).
+          Canonical lowercase values: mobile, web, atm, branch, pos.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['mobile', 'web', 'atm', 'branch', 'pos']
+
+      - name: currency
+        description: >
+          ISO 4217 currency code, uppercase. 9 currencies observed in
+          transactions: USD + 7 LATAM + EUR. EUR represents ~1% of
+          transactions and is NOT present in stg_accounts — suggests
+          cross-border transfer activity (relevant for business question
+          19 on international transfer patterns).
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['USD', 'ARS', 'BRL', 'CLP', 'COP', 'MXN', 'PEN', 'UYU', 'EUR']
+
+      - name: category
+        description: >
+          Transaction category, normalized via normalize_transaction_category.
+          The macro NULL-s out 4 missing markers ('', 'NA', 'N/A', 'null')
+          so real categories aren't conflated with missing data.
+          No accepted_values test: the category set is open-ended per spec
+          (salary, groceries, utilities, rent, etc.) and we don't want to
+          over-constrain.
+
+      - name: amount
+        description: >
+          Transaction amount. Sign convention TBD per transaction_type.
+          2619 records (~3.0%) have NULL amount — uniformly distributed
+          across all transaction_types (~3% each). Documented data quality
+          issue from the generator, not a parsing bug. Tested as warn.
+        tests:
+          - not_null:
+              config:
+                severity: warn
+
+      - name: transaction_date
+        description: >
+          Transaction date, parsed via parse_date_multi_format macro.
+          May be null if the date string didn't match any supported format.
+
+  - name: stg_loans
+    description: >
+      One row per loan. View over silver_raw.stg_loans (spark output) with
+      defensive trim, type/status/collateral_type normalization, uppercase
+      currency, and multi-format date parsing on start_date and end_date.
+      Customers without loans do NOT appear here (fact-table semantics).
+    columns:
+
+      - name: loan_id
+        description: Business key for the loan.
+        tests:
+          - unique
+          - not_null
+
+      - name: customer_id
+        description: FK to dim_customer.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+
+      - name: loan_type
+        description: >
+          Normalized via normalize_loan_type. Canonical lowercase values:
+          personal, mortgage, auto, education, business.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['personal', 'mortgage', 'auto', 'education', 'business']
+
+      - name: status
+        description: >
+          Normalized via normalize_loan_status. Canonical lowercase values:
+          current, delinquent, default, paid_off.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['current', 'delinquent', 'default', 'paid_off']
+
+      - name: collateral_type
+        description: >
+          Normalized via normalize_collateral_type. Canonical values:
+          'none' (no collateral - meaningful), 'real_estate', 'vehicle',
+          'investment_portfolio', 'savings_account'. The 4 missing markers
+          ('', 'NA', 'N/A', 'null') are NULL-ed by the macro so they
+          aren't confused with the canonical 'none'.
+          May contain real NULLs after normalization.
+
+      - name: currency
+        description: >
+          ISO 4217 currency code, uppercase. May include EUR if loans were
+          issued in cross-border context (TBD per EDA on this field).
+        tests:
+          - not_null
+
+      - name: principal
+        description: Original loan amount.
+
+      - name: outstanding_balance
+        description: Remaining balance owed.
+
+      - name: days_past_due
+        description: Days overdue. 0 = current, positive = in arrears.
+        tests:
+          - not_null
+
+  - name: stg_credit_info
+    description: >
+      One row per customer. Extracts the credit_info nested object from
+      bronze.raw_fintech_data via jsonb operators. Numeric casts use the
+      safe_cast_numeric macro which NULL-s unparseable values (missing
+      markers and dirty strings like '$78.26'). For credit_score and
+      utilization_pct, both raw and validated columns are exposed along
+      with a boolean flag, following the same pattern as is_geo_valid
+      in dim_customer.
+    columns:
+
+      - name: customer_id
+        description: PK. 1:1 with dim_customer.
+        tests:
+          - unique
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+
+      - name: credit_score_raw
+        description: >
+          Raw credit_score as emitted by the generator. May include
+          sentinel values (999999), zeros, negatives, and out-of-range
+          values. Preserved for audit; downstream code should use the
+          validated `credit_score` column instead.
+
+      - name: credit_score
+        description: >
+          Validated credit_score: same as raw but NULL when outside FICO
+          range [300, 850]. Approximately 10% of records have invalid
+          raw values; this column NULL-s them. Use this for analytical
+          aggregations.
+
+      - name: is_credit_score_valid
+        description: >
+          True when credit_score_raw is in [300, 850]. False otherwise
+          (including raw=NULL). Useful as a filter in gold marts when
+          you want to count "customers with usable credit score".
+        tests:
+          - not_null
+
+      - name: utilization_pct_raw
+        description: >
+          Raw utilization_pct after safe_cast_numeric. Already NULL for
+          unparseable strings (38 records / 0.4% with formats like
+          '$78.26', '89.5 USD', '83,5'). Preserved for audit.
+
+      - name: utilization_pct
+        description: >
+          Validated utilization_pct: NULL when raw is NULL or outside
+          [0, 100]. Use this for analytical aggregations.
+
+      - name: is_utilization_pct_valid
+        description: >
+          True when utilization_pct_raw is in [0, 100]. False otherwise
+          (including raw=NULL from unparseable strings).
+        tests:
+          - not_null
+
+      - name: currency
+        description: ISO 4217 currency code (for total_limit / total_used).
+        tests:
+          - not_null
+
+      - name: bankruptcy_flag
+        description: Boolean — true if customer has bankruptcy on record.
+        tests:
+          - not_null
+
+    tests:
+      # Sanity tests on validated columns. These should pass cleanly
+      # because the validation logic above NULL-s out invalid values.
+      - dbt_utils.expression_is_true:
+          expression: "credit_score is null or (credit_score between 300 and 850)"
+      - dbt_utils.expression_is_true:
+          expression: "utilization_pct is null or (utilization_pct between 0 and 100)"
+
+  - name: stg_digital_engagement
+    description: >
+      One row per customer. Extracts the digital_engagement nested object
+      from bronze via jsonb operators. Booleans cast directly, dates
+      parsed with parse_date_multi_format, preferred_channel normalized.
+    columns:
+
+      - name: customer_id
+        description: PK. 1:1 with dim_customer.
+        tests:
+          - unique
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+
+      - name: mobile_app_registered
+        description: Boolean — true if customer registered on mobile app.
+        tests:
+          - not_null
+
+      - name: web_banking_registered
+        description: Boolean — true if customer registered on web banking.
+        tests:
+          - not_null
+
+      - name: preferred_channel
+        description: >
+          Customer's preferred banking channel. Normalized via normalize_casing.
+          5 canonicals observed (EDA day 6): mobile, atm, branch, phone, web.
+          Note: 'phone' here is distinct from transaction.channel which uses
+          'pos' — different semantic dimensions.
+        tests:
+          - accepted_values:
+              values: ['mobile', 'atm', 'branch', 'phone', 'web']
+
+      - name: avg_monthly_logins
+        description: Average logins per month. Non-negative integer.
+
+    tests:
+      - dbt_utils.expression_is_true:
+          expression: "avg_monthly_logins is null or avg_monthly_logins >= 0"
