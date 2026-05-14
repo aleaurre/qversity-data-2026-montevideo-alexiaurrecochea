@@ -66,6 +66,7 @@ normalized as (
         interest_rate,
         {{ parse_date_multi_format('opened_date') }}    as opened_date,
         {{ normalize_account_status('status') }}        as status,
+        trim(branch_code)                               as branch_code,
 
         -- ---------- Audit ----------
         bronze_id,
