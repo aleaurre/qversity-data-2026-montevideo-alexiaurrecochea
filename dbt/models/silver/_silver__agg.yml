@@ -1,0 +1,70 @@
+version: 2
+
+# Tests for aggregate models in the silver layer.
+#
+# Aggregates (agg_*) have 1 row per business entity with measure columns
+# (counts, sums, etc.) computed from upstream staging/dimensions. They sit
+# between dim_* and gold marts. Tests focus on PK uniqueness, referential
+# integrity to dimensions, and non-null counts.
+
+models:
+
+  - name: agg_customer_activity
+    description: >
+      Per-customer activity aggregate. One row per customer with accounts,
+      transactions, and loans counts plus a total_products convenience
+      column. Moved from gold.customer_summary on day 6 — see decisions.md.
+    columns:
+
+      - name: customer_id
+        description: PK. Must be 1:1 with dim_customer.
+        tests:
+          - unique
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+
+      - name: accounts_count
+        description: >
+          Number of accounts owned by the customer. COALESCE'd to 0 so
+          never null. Spec says 2-5 per customer; values outside that
+          range may surface as data quality issues.
+        tests:
+          - not_null
+
+      - name: transactions_count
+        description: >
+          Number of transactions for the customer. COALESCE'd to 0.
+          Spec says 5-30 per customer in the raw dataset.
+        tests:
+          - not_null
+
+      - name: loans_count
+        description: >
+          Number of loans for the customer. COALESCE'd to 0. Customers
+          with 0 loans are preserved (LEFT JOIN to stg_loans).
+        tests:
+          - not_null
+
+      - name: total_products
+        description: >
+          accounts_count + loans_count. Used for business question 24
+          ("average number of products per customer by segment").
+        tests:
+          - not_null
+
+    tests:
+      # Non-negativity of counts. COALESCE(...,0) in the model guarantees
+      # this, but tests are explicit defensive contracts.
+      - dbt_utils.expression_is_true:
+          expression: "accounts_count >= 0"
+      - dbt_utils.expression_is_true:
+          expression: "transactions_count >= 0"
+      - dbt_utils.expression_is_true:
+          expression: "loans_count >= 0"
+      # Sanity: total_products is defined as accounts_count + loans_count.
+      # This test guards against future refactors that might break that
+      # definition silently.
+      - dbt_utils.expression_is_true:
+          expression: "total_products = accounts_count + loans_count"
