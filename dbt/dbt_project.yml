@@ -50,9 +50,6 @@ models:
     # target schema defined in profiles.yml. To get clean `bronze` /
     # `silver` / `gold` schema names (not `qversity_bronze`) we set
     # `generate_schema_name` via a custom macro — see macros/generate_schema_name.sql.
-    bronze:
-      +materialized: view
-      +schema: bronze
     silver:
       +materialized: table
       +schema: silver
