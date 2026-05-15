@@ -1035,3 +1035,52 @@ Razón: el dataset ya provee el status semánticamente. Los dbt tests verificar�
 - `mart_*` → `table` (PowerBI necesita velocidad)
 - Modelos intermedios (si los hay) → `view` o `ephemeral`
 - Toda la lógica de bucketing vive en macros bajo `dbt/macros/` para reuso entre marts
+
+
+## **$env:VAR vacías en sesiones nuevas:** 
+las variables del `.env` solo se cargan en el contexto de `docker compose`, NO en la sesión de PowerShell. Comandos del tipo `docker exec qversity_postgres psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "..."` fallan con `role "-d" does not exist` porque `$env:POSTGRES_USER` se expande a string vacío y `psql` reinterpreta los flags. Solución portátil: leer las envs desde adentro del container con comillas simples por fuera para evitar expansión prematura de PowerShell:
+```powershell
+  docker exec qversity_postgres bash -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB -c "..."'
+```
+
+### Sub-división del Silver layer: `silver_raw` vs `silver`
+
+El warehouse tiene **dos schemas** para Silver, no uno solo:
+
+| Schema | Responsable | Contenido | Ejemplo |
+|--------|-------------|-----------|---------|
+| `silver_raw` | PySpark (via JDBC) | Staging tables post-flatten: arrays explotados, deduplicación, syntactic clean (trim, empty→NULL). Sin nested arrays, sin normalización semántica. | `silver_raw.stg_accounts`, `silver_raw.stg_transactions`, `silver_raw.stg_loans` |
+| `silver` | dbt | Modelos limpios: cast de tipos (string→date, string→numeric), normalización semántica (casing, language mapping), constraints (`accepted_values`), flattening de objetos anidados (credit_info, digital_engagement). | `silver.dim_customers`, `silver.fct_transactions`, `silver.fct_loans` |
+
+**Razón:** la consigna define "Silver - PySpark" y "Silver - dbt" como dos sub-etapas con responsabilidades distintas (secciones 5.2 y 5.3). Separarlas físicamente en dos schemas explicita el contrato:
+- Gold lee solo de `silver.*` (dbt-clean), nunca de `silver_raw.*`
+- dbt silver lee de `silver_raw.*` y de `bronze.*` (para `credit_info` y `digital_engagement`, que son objetos no arrays y por eso no pasaron por Spark)
+- Spark nunca escribe en `silver.*`
+
+**Beneficio operativo:** si dbt silver explota en una corrida, `silver_raw` queda intacto y se puede re-correr dbt sin re-correr Spark. Aísla fallos por capa.
+
+**Variable de entorno:** `SPARK_TARGET_SCHEMA=silver_raw` en `.env` parametriza el destino de Spark. Cambiarlo afecta todos los scripts `flatten_*.py` simultáneamente.
+
+
+### División de responsabilidades por capa (refinado Día 8)
+
+| Capa | Responsabilidad | Ejemplos |
+|------|-----------------|----------|
+| **PySpark → `silver_raw`** | Syntactic cleaning | `trim()`, empty string → `NULL`, deduplicación, array flattening |
+| **dbt → `silver`** | Semantic normalization + dimensiones transversales | Cast de tipos, normalización de casing/traducciones, derivaciones aritméticas neutrales (`age`, `tenure_months`), constraints, **y buckets de uso transversal** (`age_bucket`, `tenure_bucket`) |
+| **dbt → `gold`** | Bucketing analítico específico + business logic | `risk_bucket`, `utilization_bucket`, `credit_score_bucket`, `days_past_due_bucket`, definiciones de revenue/delinquency, agregaciones por grano |
+
+**Por qué age_bucket y tenure_bucket viven en Silver y no en Gold:**
+
+Ambos son dimensiones de uso transversal: aparecen en al menos 3 marts (`mart_customer_360`, `mart_digital_engagement`, `mart_acquisition_trend`). Materializarlos una vez en `silver.dim_customer` evita duplicación de macros en todos los marts (DRY), y respeta la consigna que pide "Reusability and clarity of metrics". El argumento purista (que "todo bucket es analítico, por tanto vive en Gold") cede ante el argumento pragmático (que una dimensión consumida por múltiples marts se pre-calcula una vez).
+
+**Por qué risk/utilization/credit_score/dpd viven en Gold:**
+
+A diferencia de age/tenure, estos buckets son interpretaciones analíticas específicas con cortes basados en convenciones de industria (FICO para utilization y credit_score; buckets regulatorios para DPD; literal de la consigna Q9 para risk). Tienen menos uso transversal: risk_bucket aparece en `customer_360` y poco más; utilization_bucket solo en `customer_360`; credit_score_bucket solo donde se hace análisis por país (Q6); dpd_bucket solo en `loan_portfolio`. Pre-calcular en Silver lo que se usa una sola vez es over-engineering.
+
+**Heurística operativa para futuros buckets:**
+
+- ¿Lo usan 3+ marts? → Silver, como columna materializada en la dim.
+- ¿Lo usa 1-2 marts? → Gold, vía macro.
+- ¿Cambia frecuentemente la definición de negocio? → Gold (cambios baratos).
+- ¿Es estable y de uso muy general? → Silver (un solo lugar de verdad).
