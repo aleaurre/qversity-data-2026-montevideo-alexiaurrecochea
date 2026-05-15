@@ -1238,3 +1238,41 @@ Descubierto al materializar `dim_digital_engagement` como table (antes era view,
 **Lección arquitectónica:** convertir views Silver a tables expone bugs latentes de cast. View = cast lazy en read-time = bugs ocultos; table = cast eager en write-time = bugs explícitos. Materializar como table es **mejor para DQ** (no solo para performance).
 
 **Análisis de impacto:** `bankruptcy_flag` en `credit_info` es la única otra columna boolean en Silver — verificada limpia (solo `t`/`f`). No requiere fix.
+
+
+### Refactor Silver descubierto durante diseño de Gold (Día 8)
+
+Diseñando `mart_customer_360` se descubrió deuda técnica en Silver que se resolvió antes de seguir con Gold. Cuatro hallazgos:
+
+**13. Rename incompleto: `stg_credit_info` → `dim_credit_info`**
+
+En un día anterior se había renombrado el archivo `.sql` pero no se corrió `dbt run` ni se actualizó el YAML. Resultado: vista huérfana `silver.stg_credit_info` colgada en Postgres, modelo `dim_credit_info` registrado en el grafo dbt pero nunca materializado, tests del YAML apuntando al nombre viejo.
+
+Cleanup: drop view huérfana, edición de header del archivo, actualización de `_silver__stg.yml` línea 290, `dbt run --full-refresh`, `dbt test --select dim_credit_info` (9/9 PASS).
+
+**Lección operativa:** después de `git mv` de un modelo dbt, siempre seguir con `DROP` del objeto viejo en la DB + `dbt run` + actualizar `schema.yml`. Si no, queda inconsistencia entre código y warehouse.
+
+**14. Refactor simétrico: `stg_digital_engagement` → `dim_digital_engagement`**
+
+Para consistencia con `dim_credit_info` (mismo patrón de objeto 1:1 desde Bronze, mismo grano customer), se renombró también. Se materializó como `table` en vez de `view`. 7/7 tests PASS post-refactor.
+
+**Estado final de Silver:** todas las tablas con prefijo `dim_*`/`fct_*`/`agg_*`. Ninguna `stg_*` en el schema `silver` (las `stg_*` viven solo en `silver_raw`, output de Spark).
+
+**15. Hallazgo DQ crítico: variantes boolean en digital_engagement**
+
+Al materializar `dim_digital_engagement` como table (antes era view), Postgres explotó con `invalid input syntax for type boolean: "si"`. Las 4 columnas booleanas del bloque `digital_engagement` contienen variantes no estándar:
+
+| Variante | Lenguaje/encoding | Filas afectadas |
+|---|---|---|
+| `true`/`false` | Estándar | ~8,500 |
+| `yes`/`no` | Inglés casing | ~120 |
+| `si` | Español sin tilde | ~86 |
+| `0`/`1` | Numeric | ~118 |
+
+**Solución:** macro `safe_cast_boolean()` análoga a `safe_cast_numeric()` del Día 6. Normaliza variantes a `true`/`false`/`NULL`.
+
+**Lección arquitectónica:** **convertir views Silver a tables expone bugs latentes de cast.** View = cast lazy en read-time = bugs ocultos hasta que alguien consulta la fila ofensiva. Table = cast eager en write-time = bugs explícitos al `dbt run`. Materializar como table es **mejor para DQ** (no solo para performance).
+
+**Análisis de impacto cruzado:** `bankruptcy_flag` en `credit_info` es la única otra columna boolean en Silver. Verificada limpia (solo `t`/`f`). No requiere fix.
+
+**Principio derivado:** todo cast no-trivial desde JSON (numeric, boolean, date) debe usar macro defensiva con NULL fallback, no cast nativo `::tipo`. Macros disponibles: `safe_cast_numeric`, `safe_cast_boolean`, `parse_date_multi_format`. Casts nativos solo cuando los datos están demostrablemente limpios y el modelo es view (read-time, fail-fast aceptable).
