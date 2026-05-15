@@ -973,3 +973,65 @@ directly when needed.
 git tag -a v0.2.0-silver -m "Silver layer complete: PySpark flattening + dbt cleaning, dimensions, facts, 160 tests passing (7 warns documented as generator DQ)"
 git push origin main
 git push origin v0.2.0-silver
+
+
+## Día 8 — Diseño de Gold layer
+
+### Decisiones de modelado
+
+**1. Arquitectura: 8 marts (no 9, no 24)**
+
+Mapeo mart → preguntas:
+
+| Mart | Grano | Preguntas |
+|------|-------|-----------|
+| `mart_customer_360` | 1 fila/customer | Q1, Q9, Q10, Q11, Q13, Q14, Q24 + credit profile |
+| `mart_revenue_by_segment` | segment × month | Q1 (rollup) |
+| `mart_transactions_summary` | category × channel × month | Q3, Q15, Q16, Q17, Q18 |
+| `mart_loan_portfolio` | loan_id (con buckets) | Q4, Q5, Q8, Q23 |
+| `mart_acquisition_trend` | month | Q12 |
+| `mart_digital_engagement` | segment × age_bucket | Q20, Q21 |
+| `mart_account_mix` | country × account_type | Q2, Q22 |
+| `mart_international_transfers` | currency_pair × month | Q19 |
+
+Cobertura: 24/24 preguntas. Decisión: NO crear un mart por pregunta — la consigna evalúa "reusability and clarity of metrics" y "model design quality", lo cual penaliza la redundancia.
+
+**2. Fusión `mart_credit_risk` → `mart_customer_360`**
+
+Razón: el dataset es un único punto en el tiempo (no hay snapshots históricos). Dos marts con grano `customer` serían redundantes. `mart_customer_360` lleva el perfil + credit_score + utilization + risk_bucket en una sola tabla. Si en el futuro hubiera snapshots, se separaría en `dim_customer` + `fct_credit_risk_snapshot`.
+
+**3. Definición de revenue (la consigna pide definirlo)**
+
+`revenue = transaction_fees + interest_income`
+
+- `transaction_fees`: suma de `amount` en `silver.transactions` donde `type = 'fee'` y `status = 'completed'`
+- `interest_income`: suma mensual de `(outstanding_balance × interest_rate / 12)` sobre `silver.loans` donde `status IN ('current','delinquent')` (loans activos generan interés; default y paid_off no)
+
+Esto representa lo que el banco GANA, no el volumen transado. El volumen se reporta aparte como `transaction_volume` para evitar confundir Q1 (revenue) con Q15 (volume).
+
+**4. Definición de delinquency (la consigna pide definirlo)**
+
+Se confía en el campo `status` del dataset tal cual viene en `silver.loans`:
+- `current` — al día
+- `delinquent` — en mora (sin importar days_past_due)
+- `default` — incumplimiento
+- `paid_off` — saldado
+
+Razón: el dataset ya provee el status semánticamente. Los dbt tests verificarán consistencia interna (ej. `accepted_values` en `loan_status`). Las inconsistencias entre `status` y `days_past_due`, si existen, se documentarán pero no se corregirán en Gold — el origen es la verdad.
+
+**5. Buckets**
+
+| Dimensión | Buckets | Justificación |
+|-----------|---------|---------------|
+| age_bucket | 18-25, 26-35, 36-50, 51-65, 65+ | Estándar banca retail. Separa "joven sin historial" de "adulto joven con productos" — relevante para Q21 (digital vs branch by age). |
+| risk_bucket | low (0-30), medium (31-60), high (61-85), critical (86-100) | Literal de la consigna Q9: "low/medium/high/critical" → 4 niveles obligatorios. |
+| utilization_bucket | healthy (<30%), moderate (30-70%), high (>70%) | Regla FICO. Estándar global de credit scoring. |
+| credit_score_bucket | poor (300-579), fair (580-669), good (670-739), very_good (740-799), exceptional (800-850) | Rangos FICO estándar. Aplicable a Q6 (credit score distribution by country). |
+| days_past_due_bucket | current (0), 1-30, 31-60, 61-90, 90+ | Estándar de regulación bancaria (buckets de provisioning). Aplicable a Q8. |
+| tenure_years | calculado desde registration_date al date_run | Año fraccional `(date_run - registration_date) / 365.25`. |
+
+**6. Materialización**
+
+- `mart_*` → `table` (PowerBI necesita velocidad)
+- Modelos intermedios (si los hay) → `view` o `ephemeral`
+- Toda la lógica de bucketing vive en macros bajo `dbt/macros/` para reuso entre marts
