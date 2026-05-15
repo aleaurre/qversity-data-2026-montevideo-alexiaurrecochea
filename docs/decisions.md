@@ -1084,3 +1084,139 @@ A diferencia de age/tenure, estos buckets son interpretaciones analíticas espec
 - ¿Lo usa 1-2 marts? → Gold, vía macro.
 - ¿Cambia frecuentemente la definición de negocio? → Gold (cambios baratos).
 - ¿Es estable y de uso muy general? → Silver (un solo lugar de verdad).
+
+
+## Día 8 — Diseño de Gold + primeros marts
+
+### Decisiones de modelado
+
+**1. Arquitectura: 8 marts (no 9, no 24)**
+
+Mapeo mart → preguntas:
+
+| Mart | Grano | Preguntas |
+|------|-------|-----------|
+| `mart_customer_360` | 1 fila/customer | Q1, Q9, Q10, Q11, Q13, Q14, Q24 + credit profile |
+| `mart_revenue_by_segment` | segment × month | Q1 (rollup) |
+| `mart_transactions_summary` | category × channel × month | Q3, Q15, Q16, Q17, Q18 |
+| `mart_loan_portfolio` | loan_id (con buckets) | Q4, Q5, Q8, Q23 |
+| `mart_acquisition_trend` | month | Q12 |
+| `mart_digital_engagement` | segment × age_bucket | Q20, Q21 |
+| `mart_account_mix` | country × account_type × currency | Q2, Q22 |
+| `mart_international_transfers` | currency_pair × month | Q19 |
+
+Cobertura: 24/24 preguntas. NO crear un mart por pregunta — la consigna evalúa "reusability and clarity of metrics" y "model design quality", lo cual penaliza redundancia.
+
+**2. Fusión `mart_credit_risk` → `mart_customer_360`**
+
+Razón: el dataset es un único punto en el tiempo (no hay snapshots históricos). Dos marts con grano `customer` serían redundantes. `mart_customer_360` lleva el perfil + credit_score + utilization + risk_bucket en una sola tabla. Si en el futuro hubiera snapshots, se separaría en `dim_customer` + `fct_credit_risk_snapshot`.
+
+**3. Definición de revenue (la consigna pide definirlo)**
+
+`revenue = transaction_fees + interest_income`
+
+- `transaction_fees`: suma de `amount` en `silver.fct_transactions` donde `type = 'fee'` y `status = 'completed'`
+- `interest_income`: suma mensual de `(outstanding_balance × interest_rate / 12)` sobre loans con `status IN ('current','delinquent')` (loans activos generan interés; default y paid_off no)
+
+Representa lo que el banco GANA, no el volumen transado. El volumen se reporta aparte como `transaction_volume` para no confundir Q1 (revenue) con Q15 (volume).
+
+**4. Definición de delinquency (la consigna pide definirlo)**
+
+Se confía en el campo `status` del dataset tal cual viene en `silver.dim_loan`/`silver.fct_loans`:
+- `current` — al día
+- `delinquent` — en mora
+- `default` — incumplimiento
+- `paid_off` — saldado
+
+Razón: el dataset ya provee el status semánticamente. Los dbt tests verifican consistencia interna (`accepted_values` en `loan_status`). Inconsistencias entre `status` y `days_past_due`, si existen, se documentan pero no se corrigen en Gold — el origen es la verdad.
+
+**5. Buckets analíticos**
+
+| Dimensión | Buckets | Vive en | Justificación |
+|-----------|---------|---------|---------------|
+| age_bucket | 18-25, 26-35, 36-50, 51-65, 65+, under_18 (DQ flag) | **Silver** (`dim_customer`) | Uso transversal en 3+ marts. Pre-cálculo evita duplicación. |
+| tenure_bucket | new (<6m), established (6-24m), loyal (>24m) | **Silver** (`dim_customer`) | Uso transversal en 3+ marts. |
+| risk_bucket | low (0-30), medium (31-60), high (61-85), critical (86-100) | Gold (macro) | Literal Q9 → 4 niveles obligatorios. |
+| utilization_bucket | healthy (<30%), moderate (30-70%), high (>70%) | Gold (macro) | Regla FICO. Uso analítico específico. |
+| credit_score_bucket | poor (300-579), fair (580-669), good (670-739), very_good (740-799), exceptional (800-850) | Gold (macro) | Rangos FICO estándar. |
+| days_past_due_bucket | current (0), 1-30, 31-60, 61-90, 90+ | Gold (macro) | Buckets regulatorios de provisioning bancario. |
+| tenure_years | calculado decimal | Gold (macro auxiliar) | Para casos donde tenure como número se necesita además del bucket categórico. |
+
+### Refinamiento de principios
+
+**6. División de responsabilidades por capa (refinado)**
+
+El principio original "Spark = syntactic / dbt = semantic" se extiende a 3 niveles:
+
+| Capa | Responsabilidad | Ejemplos |
+|------|-----------------|----------|
+| **PySpark → `silver_raw`** | Syntactic cleaning | `trim()`, empty → NULL, dedup, array flattening |
+| **dbt → `silver`** | Semantic normalization + dimensiones transversales | Cast de tipos, normalización casing/traducciones, derivaciones aritméticas neutrales (`age`, `tenure_months`), buckets de uso transversal (`age_bucket`, `tenure_bucket`), constraints |
+| **dbt → `gold`** | Bucketing analítico específico + business logic | `risk_bucket`, `utilization_bucket`, `credit_score_bucket`, `days_past_due_bucket`, definiciones de revenue/delinquency, agregaciones por grano |
+
+**Heurística para futuros buckets:**
+- ¿Lo usan 3+ marts? → Silver, columna materializada.
+- ¿Lo usa 1-2 marts? → Gold, vía macro.
+- ¿Definición cambia frecuentemente? → Gold (cambios baratos).
+- ¿Estable y uso muy general? → Silver.
+
+**7. Sub-división del Silver layer: `silver_raw` vs `silver`**
+
+El warehouse tiene **dos schemas** para Silver, no uno solo:
+
+| Schema | Responsable | Contenido |
+|--------|-------------|-----------|
+| `silver_raw` | PySpark (vía JDBC) | Staging post-flatten: arrays explotados, dedup, syntactic clean |
+| `silver` | dbt | Modelos limpios: cast de tipos, normalización semántica, flattening de objetos anidados, constraints |
+
+**Razón:** la consigna define "Silver - PySpark" y "Silver - dbt" como dos sub-etapas (secciones 5.2 y 5.3). Separarlas físicamente en dos schemas explicita el contrato:
+- Gold lee solo de `silver.*`, nunca de `silver_raw.*`
+- dbt silver lee de `silver_raw.*` y de `bronze.*` (para objetos no-array como `credit_info`)
+- Spark nunca escribe en `silver.*`
+
+**Beneficio operativo:** si dbt silver explota en una corrida, `silver_raw` queda intacto y se puede re-correr dbt sin re-correr Spark. Aísla fallos por capa. Variable `SPARK_TARGET_SCHEMA=silver_raw` en `.env` parametriza el destino de Spark.
+
+**8. `silver.agg_customer_activity` como soporte estructural (no analítico)**
+
+Esta tabla pre-agrega conteos puros (`accounts_count`, `transactions_count`, `loans_count`, `total_products`) por customer. Inicialmente sospeché que era un mart adelantado mal ubicado en Silver, pero al revisar: **solo contiene conteos estructurales, no métricas de negocio interpretadas**. Es análogo a `dim_date` — facilita downstream sin imponer interpretaciones. Para Q24 (avg products per customer by segment) evita 3 LEFT JOIN + COUNT DISTINCT en `mart_customer_360`.
+
+Criterio: una agregación en Silver es legítima si solo cuenta/agrupa atributos estructurales del dataset (cardinalidad de relaciones). Una agregación que aplica reglas de negocio (revenue, delinquency rate, segment definitions) pertenece a Gold.
+
+### Hallazgos de data quality del Día 8
+
+**9. 183 cuentas activas con balance NULL (~3.1%)**
+
+Descubierto durante validación cruzada de `mart_account_mix`. Distribución:
+- Uniforme entre los 4 account_types (savings 29, checking 27, investment 25, credit_card 23 en USD)
+- Aparece en las 8 currencies del dataset
+- Sin patrón de concentración → ruido de generación de dataset sintético
+
+**Tratamiento en Gold:** las 183 cuentas SE INCLUYEN en `accounts_count` (Q22 es sobre popularidad, no sobre balance) pero NO contribuyen a `total_balance`/`avg_balance` (SQL `SUM`/`AVG` ignoran NULL por definición). Se agregó columna `accounts_with_balance` al mart para exponer la discrepancia, haciendo la tasa de missing data queryable desde BI.
+
+**Lección de modelado:** cuando se agrega una columna a un CTE intermedio en dbt, debe propagarse explícitamente en todos los CTEs downstream que hacen `SELECT enumerado`. Es la causa típica del bug "la columna existe en el archivo pero no en la tabla". `SELECT *` entre CTEs intermedios reduce este riesgo.
+
+**10. Multi-currency: no convertir, granular por currency**
+
+El dataset no incluye tabla de tasas FX. Sumar `balance` entre USD y ARS sería matemáticamente incorrecto. Decisión: marts que agregan balance llevan `currency` en el grano y se evita conversión inventada. Mejora futura: `dim_fx_rate` (manual o desde API) + `mart_balances_usd` consolidado.
+
+### Gotchas operativos (Windows/PowerShell)
+
+**11. `$env:VAR` vacías en sesiones nuevas de PowerShell**
+
+Las variables del `.env` solo se cargan en `docker compose`, NO en la sesión de PowerShell. Comandos del tipo `docker exec qversity_postgres psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "..."` fallan con `role "-d" does not exist` porque `$env:POSTGRES_USER` se expande a string vacío y `psql` reinterpreta los flags.
+
+**Solución portátil:** leer las envs desde adentro del container con comillas simples por fuera para evitar expansión prematura de PowerShell:
+
+```powershell
+docker exec qversity_postgres bash -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB -c "..."'
+```
+
+### Estado del día 8
+
+- ✅ 8 marts diseñados con mapeo a 24 preguntas
+- ✅ 5 macros de Gold creadas (`get_risk_bucket`, `get_utilization_bucket`, `get_credit_score_bucket`, `get_days_past_due_bucket`, `get_tenure_years`)
+- ✅ Macro duplicada (`get_age_bucket`) eliminada — se mantiene `age_bucket` original de Silver
+- ✅ `mart_acquisition_trend` validado (73 meses, suma cuadra con Silver, MoM growth funcional)
+- ✅ `mart_account_mix` validado (5,877 cuentas, multi-currency, columna DQ)
+- ✅ Config muerta de bronze en `dbt_project.yml` eliminada
+- ⏳ Pendiente: `mart_customer_360` (Día 9)
