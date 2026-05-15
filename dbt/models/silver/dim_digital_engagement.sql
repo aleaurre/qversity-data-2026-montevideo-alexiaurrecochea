@@ -1,13 +1,8 @@
-{{
-    config(
-        materialized='view'
-    )
-}}
 
 /*
     silver.stg_digital_engagement
     -----------------------------
-    Staging view extracting the `digital_engagement` nested object from bronze.
+    Dimensional table extracting the `digital_engagement` nested object from bronze.
 
     Same pattern as stg_credit_info: 1:1 nested object, extracted via
     Postgres jsonb operators, deduplicated by latest load_timestamp.
@@ -50,13 +45,13 @@ extracted as (
         (data ->> 'customer_id')::text                                          as customer_id,
 
         -- ---------- Digital engagement (1:1 nested object) ----------
-        (data -> 'digital_engagement' ->> 'mobile_app_registered')::boolean     as mobile_app_registered,
-        (data -> 'digital_engagement' ->> 'web_banking_registered')::boolean    as web_banking_registered,
+        {{ safe_cast_boolean("data -> 'digital_engagement' ->> 'mobile_app_registered'") }}    as mobile_app_registered,
+        {{ safe_cast_boolean("data -> 'digital_engagement' ->> 'web_banking_registered'") }}   as web_banking_registered,
         {{ parse_date_multi_format("data -> 'digital_engagement' ->> 'last_login_date'") }} as last_login_date,
         {{ safe_cast_numeric("data -> 'digital_engagement' ->> 'avg_monthly_logins'", 'int') }} as avg_monthly_logins,
         {{ normalize_casing("data -> 'digital_engagement' ->> 'preferred_channel'") }} as preferred_channel,
-        (data -> 'digital_engagement' ->> 'push_notifications')::boolean        as push_notifications,
-        (data -> 'digital_engagement' ->> 'paperless_statements')::boolean      as paperless_statements,
+        {{ safe_cast_boolean("data -> 'digital_engagement' ->> 'push_notifications'") }}       as push_notifications,
+        {{ safe_cast_boolean("data -> 'digital_engagement' ->> 'paperless_statements'") }}     as paperless_statements,
 
         -- ---------- Audit ----------
         load_timestamp

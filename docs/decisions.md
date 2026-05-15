@@ -1220,3 +1220,21 @@ docker exec qversity_postgres bash -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB -c
 - ✅ `mart_account_mix` validado (5,877 cuentas, multi-currency, columna DQ)
 - ✅ Config muerta de bronze en `dbt_project.yml` eliminada
 - ⏳ Pendiente: `mart_customer_360` (Día 9)
+
+
+**12. Hallazgo DQ: variantes boolean en digital_engagement**
+
+Descubierto al materializar `dim_digital_engagement` como table (antes era view, cast lazy enmascaraba el problema). Las 4 columnas booleanas del bloque `digital_engagement` en el JSON original contienen variantes no estándar:
+
+| Variante | Lenguaje/encoding | Filas afectadas (aprox) |
+|---|---|---|
+| `true`/`false` | Estándar | ~8,500 |
+| `yes`/`no` | Inglés casing | ~120 |
+| `si` | Español sin tilde | ~86 |
+| `0`/`1` | Numeric | ~118 |
+
+**Solución:** macro `safe_cast_boolean()` que normaliza estas variantes a `true`/`false`/`NULL`. Aplicada en `dim_digital_engagement`. **Análoga a `safe_cast_numeric`** del Día 6 — sigue el mismo patrón defensivo.
+
+**Lección arquitectónica:** convertir views Silver a tables expone bugs latentes de cast. View = cast lazy en read-time = bugs ocultos; table = cast eager en write-time = bugs explícitos. Materializar como table es **mejor para DQ** (no solo para performance).
+
+**Análisis de impacto:** `bankruptcy_flag` en `credit_info` es la única otra columna boolean en Silver — verificada limpia (solo `t`/`f`). No requiere fix.

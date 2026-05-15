@@ -287,11 +287,11 @@ models:
         tests:
           - not_null
 
-  - name: stg_credit_info
+  - name: dim_credit_info
     description: >
-      One row per customer. Extracts the credit_info nested object from
-      bronze.raw_fintech_data via jsonb operators. Numeric casts use the
-      safe_cast_numeric macro which NULL-s unparseable values (missing
+      One row per customer. Dimensional table extracting the credit_info
+      nested object from bronze.raw_fintech_data via jsonb operators.
+      Numeric casts use the safe_cast_numeric macro which NULL-s unparseable values (missing
       markers and dirty strings like '$78.26'). For credit_score and
       utilization_pct, both raw and validated columns are exposed along
       with a boolean flag, following the same pattern as is_geo_valid
@@ -365,7 +365,7 @@ models:
       - dbt_utils.expression_is_true:
           expression: "utilization_pct is null or (utilization_pct between 0 and 100)"
 
-  - name: stg_digital_engagement
+  - name: dim_digital_engagement
     description: >
       One row per customer. Extracts the digital_engagement nested object
       from bronze via jsonb operators. Booleans cast directly, dates

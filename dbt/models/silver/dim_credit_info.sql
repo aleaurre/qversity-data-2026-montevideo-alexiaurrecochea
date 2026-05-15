@@ -1,13 +1,9 @@
-{{
-    config(
-        materialized='view'
-    )
-}}
+
 
 /*
-    silver.stg_credit_info
+    silver.dim_credit_info
     ----------------------
-    Staging view extracting the `credit_info` nested object from bronze.
+    Dimensional table extracting the `credit_info` nested object from bronze.
 
     Pattern (different from stg_accounts/transactions/loans):
     credit_info is a 1:1 nested OBJECT (not a 1:N array). It doesn't need
