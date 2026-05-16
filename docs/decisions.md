@@ -8,7 +8,7 @@
 
 ---
 
-## 1. Calidad de datos — hallazgos clave del EDA
+## 1. Calidad de datos - hallazgos clave del EDA
 
 ### 1.1 Volumen
 - **5.100 records** de customer (consigna decía ~5.000 ✓).
@@ -27,7 +27,7 @@ detectados por parsers automáticos. Una función de normalización los conviert
 a NULL real antes de cualquier análisis.
 
 ### 1.4 Fechas en 4 formatos coexistentes
-Ningún null real — solo problemas de parsing. **El separador desambigua
+Ningún null real - solo problemas de parsing. **El separador desambigua
 totalmente el orden día/mes**, lo que hace al dataset 100% recuperable:
 
 | Formato      | %    | Discriminador           |
@@ -55,7 +55,7 @@ Afecta: `accounts.balance`, `transactions.amount`, `loans.principal`,
 Campos con valores aparentemente generados con escala equivocada (max ~$2 mil
 millones): `balance`, `principal`, `outstanding_balance`, `monthly_payment`,
 `total_limit`, `total_used`.
-- **No descartar** — pueden ser legítimos en `private_banking`.
+- **No descartar** - pueden ser legítimos en `private_banking`.
 - Marcar con flag `is_outlier_<col>` por percentil 99.
 - En Gold, los KPIs de tendencia central usan **mediana**, no media.
 
@@ -273,7 +273,7 @@ deben pasar después de la dedup en cascada.
 ## 8. Casos especiales documentados
 
 ### 8.1 EUR en transactions
-940 transacciones (1%) en EUR a pesar de ser un dataset LATAM. **Conservar** —
+940 transacciones (1%) en EUR a pesar de ser un dataset LATAM. **Conservar** -
 sirven para responder business question #19 (international transfer patterns).
 
 ### 8.2 `phone` en preferred_channel
@@ -298,7 +298,7 @@ completitud + recencia maneja N apariciones sin lógica especial.
 
 ### Imagen base de Airflow: 2.10.5
 La consigna pide "Apache Airflow 2.7+". Elegimos 2.10.5 (última 2.x estable al
-momento de arrancar el proyecto) por seguridad — la imagen 2.7.3 acumula CVEs
+momento de arrancar el proyecto) por seguridad - la imagen 2.7.3 acumula CVEs
 críticos por antigüedad. Reduce drásticamente la superficie de vulnerabilidades
 manteniendo compatibilidad total con la consigna.
 
@@ -315,7 +315,7 @@ configuración no escalaría a millones de filas; en ese caso requeriría un
 cluster Spark externo.
 
 
-## Día 3 — PySpark setup + flatten de accounts
+## PySpark setup + flatten de accounts
 
 ### 1. Decisión arquitectónica: cómo se invoca PySpark desde Airflow
 
@@ -413,7 +413,7 @@ se aplicará en `stg_transactions` y `stg_loans`.
 
 **Implicancia para tests dbt**: la PK `account_id` en `silver.stg_accounts`
 debe ser única. Si en runs futuros este test falla, indica que la window
-function no cubrió algún caso edge — investigar antes de relajar la regla.
+function no cubrió algún caso edge - investigar antes de relajar la regla.
 
 ### 8. Modo de escritura en silver: `overwrite` con `truncate=true`
 
@@ -457,12 +457,12 @@ verificables automáticamente.
 - Cero NULLs en campos categóricos (`account_type`, `status`,
   `currency`, `branch_code`).
 
-**`account_type` — 4 valores reales, 20 variantes en bronze**
+**`account_type` - 4 valores reales, 20 variantes en bronze**
 - 5 variantes por valor, todas diferenciadas únicamente por whitespace.
 - Resuelto en Spark con `trim()`: 20 → 4 valores canónicos.
 - Set canónico: `savings`, `checking`, `investment`, `credit_card`.
 
-**`status` — 3 valores reales, 12 variantes en bronze**
+**`status` - 3 valores reales, 12 variantes en bronze**
 - Variantes por (a) casing inconsistente, (b) traducciones al español.
 - El trim NO colapsa estas variantes (son decisiones semánticas).
 - Familias detectadas:
@@ -480,7 +480,7 @@ verificables automáticamente.
 - La consigna avisa explícitamente sobre "unexpected statuses": esto es
   exactamente ese caso.
 
-**`currency` — limpio, dominio LATAM coherente**:
+**`currency` - limpio, dominio LATAM coherente**:
 - 8 valores: USD + 7 monedas locales (PEN, COP, MXN, UYU, BRL, ARS, CLP).
 - Hallazgo de negocio: **~50% de las cuentas (8.734 / 17.529) están
   denominadas en USD**, consistente con la dolarización informal en la
@@ -489,7 +489,7 @@ verificables automáticamente.
   by country"), hay que decidir si reportar en moneda nominal o convertir
   a una moneda común. Decisión a tomar en día 5-6.
 
-**`branch_code` — limpio**:
+**`branch_code` - limpio**:
 - Patrón consistente `BR-NNN` (3 dígitos).
 - Distribución pareja en el top 20 (29-36 cuentas por branch).
 - Sin nulls, sin variantes raras.
@@ -503,7 +503,7 @@ duplicate that's natural to its abstraction.
 ### Why deduplicate at all
 
 Bronze is append-only: every DAG run inserts the full dataset again with a
-fresh `load_id` and `load_timestamp`. This is intentional — bronze is meant
+fresh `load_id` and `load_timestamp`. This is intentional - bronze is meant
 to be a faithful audit log of what arrived from the source, not a deduped
 view. During development the DAG runs many times, so by the time we hit
 silver, the same `customer_id` (and every PK nested inside it) appears in
@@ -514,7 +514,7 @@ breaking PK-uniqueness tests in dbt and inflating every aggregate downstream.
 
 ### Where dedup happens
 
-**PySpark (silver staging tables) — dedup by array PK.**
+**PySpark (silver staging tables) - dedup by array PK.**
 
 Each of the three flatteners (`flatten_accounts.py`, `flatten_transactions.py`,
 `flatten_loans.py`) deduplicates by the natural primary key of the array it
@@ -536,11 +536,11 @@ latest known state of each entity, not its history. If we ever need the
 history (SCD2-style), that lives in a dedicated dimensional model in
 silver/gold, not in staging.
 
-**dbt (silver dimensions) — dedup by customer_id.**
+**dbt (silver dimensions) - dedup by customer_id.**
 
 Customer-level dedup is *not* done in PySpark. The reason is the project's
 tool roles: PySpark's job is array flattening, and the customer record itself
-has no nested arrays to flatten — its flat fields are already flat in the
+has no nested arrays to flatten - its flat fields are already flat in the
 source JSON. So `dim_customers` is built directly in dbt, reading from
 `bronze.raw_fintech_data` via a staging model that parses the `jsonb` and
 applies the same "latest `load_timestamp` wins" rule using `qualify
@@ -552,16 +552,16 @@ duplicate work between the layers.
 
 ### Edge cases
 
-- **Same `load_timestamp` for two versions of the same PK** — happens if the
+- **Same `load_timestamp` for two versions of the same PK** - happens if the
   DAG fires twice in the same second. Spark picks one arbitrarily; since
   the rows are byte-identical when this occurs (same source file, same
   parsing), it doesn't matter which one wins. Documented but not guarded
   against.
-- **Null PKs** — `row_number()` treats nulls as their own group and would
+- **Null PKs** - `row_number()` treats nulls as their own group and would
   keep one. We don't filter nulls in PySpark; if a null PK appears, it's an
   upstream data-quality bug that dbt's `not_null` test will catch and fail
   loudly on, which is the behavior we want.
-- **Customers without loans** — `flatten_loans.py` uses `explode` (not
+- **Customers without loans** - `flatten_loans.py` uses `explode` (not
   `explode_outer`), so customers with empty `loans[]` produce zero rows.
   This is correct: `silver.stg_loans` is a fact table of loans, not a
   customer × loan matrix. Metrics like "% of customers with a loan" are
@@ -570,9 +570,9 @@ duplicate work between the layers.
 ### Sanity checks
 
 Each flattener logs three numbers per run:
-- `bronze records read` — how many rows came from `bronze.raw_fintech_data`
-- `<entity> after explode` — how many rows after exploding the array
-- `<entity> after dedup` / `duplicates dropped` — final count vs. dropped
+- `bronze records read` - how many rows came from `bronze.raw_fintech_data`
+- `<entity> after explode` - how many rows after exploding the array
+- `<entity> after dedup` / `duplicates dropped` - final count vs. dropped
 
 In a healthy run with N bronze loads of the same dataset, `duplicates
 dropped` should equal `(N-1) × <expected entity count>`. If it's higher, a
@@ -581,7 +581,7 @@ went partial.
 
 
 
-## Day 6 — Silver dbt Design Decisions
+## Silver dbt Design Decisions
 
 ### Refined Spark vs dbt responsibility split
 
@@ -594,7 +594,7 @@ The original split (Spark = syntactic, dbt = semantic) is refined to be more pre
   `jsonb` operators are both performant (5k rows) and idiomatic.
 - **Deduplication follows the same logic**: array entities (accounts, txns, loans)
   are deduped in Spark as part of their explode pipeline. Customer dedup happens
-  in dbt because customers are not exploded — they are extracted flat from bronze.
+  in dbt because customers are not exploded - they are extracted flat from bronze.
 
 Rationale: the meaningful distinction is *whether explode is needed*, not
 *whether dedup is needed*. Forcing customer through Spark just to dedup would
@@ -694,7 +694,7 @@ built by dbt and any future clean-clone setup will never produce the legacy
 version.
 
 
-## Day 6 — Silver dbt Design Decisions
+## Silver dbt Design Decisions
 
 ### Refined Spark vs dbt responsibility split
 
@@ -812,7 +812,6 @@ moved to `models/silver/agg_customer_activity.sql`. Rationale:
 - Gold marts (day 7+) — prefix to be decided, likely `mart_*` or `gold_*`.
 
 
-
 ### Generalized pattern: all customer-level categoricals need normalization
 
 Day 6 testing surfaced that the casing chaos + Spanish translation pattern
@@ -850,7 +849,7 @@ because of a bug in our code), warn lets the issue stay visible in
 ever refreshed and the NULL rate changes significantly, we'll see it
 in the warn count.
 
-## Day 6 (continued) — Staging models, dimensions, and aggregate
+## Staging models, dimensions, and aggregate
 
 ### Macro architecture: normalize_casing + entity-specific specifics
 
@@ -975,122 +974,21 @@ git push origin main
 git push origin v0.2.0-silver
 
 
-## Día 8 — Diseño de Gold layer
+## Diseño de Gold + primeros 3 marts
 
-### Decisiones de modelado
+### Resumen ejecutivo del día
 
-**1. Arquitectura: 8 marts (no 9, no 24)**
+- Diseño de la capa Gold: 8 marts mapeados a 24 preguntas (no un mart por pregunta).
+- 3 marts implementados y testeados: `mart_acquisition_trend`, `mart_account_mix`, `mart_customer_360`.
+- 65 tests dbt para los 3 marts, todos PASS.
+- 5 macros de bucketing creadas en Gold; 1 macro defensiva nueva (`safe_cast_boolean`).
+- Refactor estructural en Silver: `stg_credit_info` y `stg_digital_engagement` renombradas a `dim_*` y materializadas como `table`.
+- 5 hallazgos de data quality nuevos documentados (boolean variants, NULL balance, BETWEEN con decimales, view-lazy cast, CTE no propagado).
+- Decisiones de negocio congeladas: revenue, delinquency, 5 sets de buckets.
 
-Mapeo mart → preguntas:
+---
 
-| Mart | Grano | Preguntas |
-|------|-------|-----------|
-| `mart_customer_360` | 1 fila/customer | Q1, Q9, Q10, Q11, Q13, Q14, Q24 + credit profile |
-| `mart_revenue_by_segment` | segment × month | Q1 (rollup) |
-| `mart_transactions_summary` | category × channel × month | Q3, Q15, Q16, Q17, Q18 |
-| `mart_loan_portfolio` | loan_id (con buckets) | Q4, Q5, Q8, Q23 |
-| `mart_acquisition_trend` | month | Q12 |
-| `mart_digital_engagement` | segment × age_bucket | Q20, Q21 |
-| `mart_account_mix` | country × account_type | Q2, Q22 |
-| `mart_international_transfers` | currency_pair × month | Q19 |
-
-Cobertura: 24/24 preguntas. Decisión: NO crear un mart por pregunta — la consigna evalúa "reusability and clarity of metrics" y "model design quality", lo cual penaliza la redundancia.
-
-**2. Fusión `mart_credit_risk` → `mart_customer_360`**
-
-Razón: el dataset es un único punto en el tiempo (no hay snapshots históricos). Dos marts con grano `customer` serían redundantes. `mart_customer_360` lleva el perfil + credit_score + utilization + risk_bucket en una sola tabla. Si en el futuro hubiera snapshots, se separaría en `dim_customer` + `fct_credit_risk_snapshot`.
-
-**3. Definición de revenue (la consigna pide definirlo)**
-
-`revenue = transaction_fees + interest_income`
-
-- `transaction_fees`: suma de `amount` en `silver.transactions` donde `type = 'fee'` y `status = 'completed'`
-- `interest_income`: suma mensual de `(outstanding_balance × interest_rate / 12)` sobre `silver.loans` donde `status IN ('current','delinquent')` (loans activos generan interés; default y paid_off no)
-
-Esto representa lo que el banco GANA, no el volumen transado. El volumen se reporta aparte como `transaction_volume` para evitar confundir Q1 (revenue) con Q15 (volume).
-
-**4. Definición de delinquency (la consigna pide definirlo)**
-
-Se confía en el campo `status` del dataset tal cual viene en `silver.loans`:
-- `current` — al día
-- `delinquent` — en mora (sin importar days_past_due)
-- `default` — incumplimiento
-- `paid_off` — saldado
-
-Razón: el dataset ya provee el status semánticamente. Los dbt tests verificarán consistencia interna (ej. `accepted_values` en `loan_status`). Las inconsistencias entre `status` y `days_past_due`, si existen, se documentarán pero no se corregirán en Gold — el origen es la verdad.
-
-**5. Buckets**
-
-| Dimensión | Buckets | Justificación |
-|-----------|---------|---------------|
-| age_bucket | 18-25, 26-35, 36-50, 51-65, 65+ | Estándar banca retail. Separa "joven sin historial" de "adulto joven con productos" — relevante para Q21 (digital vs branch by age). |
-| risk_bucket | low (0-30), medium (31-60), high (61-85), critical (86-100) | Literal de la consigna Q9: "low/medium/high/critical" → 4 niveles obligatorios. |
-| utilization_bucket | healthy (<30%), moderate (30-70%), high (>70%) | Regla FICO. Estándar global de credit scoring. |
-| credit_score_bucket | poor (300-579), fair (580-669), good (670-739), very_good (740-799), exceptional (800-850) | Rangos FICO estándar. Aplicable a Q6 (credit score distribution by country). |
-| days_past_due_bucket | current (0), 1-30, 31-60, 61-90, 90+ | Estándar de regulación bancaria (buckets de provisioning). Aplicable a Q8. |
-| tenure_years | calculado desde registration_date al date_run | Año fraccional `(date_run - registration_date) / 365.25`. |
-
-**6. Materialización**
-
-- `mart_*` → `table` (PowerBI necesita velocidad)
-- Modelos intermedios (si los hay) → `view` o `ephemeral`
-- Toda la lógica de bucketing vive en macros bajo `dbt/macros/` para reuso entre marts
-
-
-## **$env:VAR vacías en sesiones nuevas:** 
-las variables del `.env` solo se cargan en el contexto de `docker compose`, NO en la sesión de PowerShell. Comandos del tipo `docker exec qversity_postgres psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "..."` fallan con `role "-d" does not exist` porque `$env:POSTGRES_USER` se expande a string vacío y `psql` reinterpreta los flags. Solución portátil: leer las envs desde adentro del container con comillas simples por fuera para evitar expansión prematura de PowerShell:
-```powershell
-  docker exec qversity_postgres bash -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB -c "..."'
-```
-
-### Sub-división del Silver layer: `silver_raw` vs `silver`
-
-El warehouse tiene **dos schemas** para Silver, no uno solo:
-
-| Schema | Responsable | Contenido | Ejemplo |
-|--------|-------------|-----------|---------|
-| `silver_raw` | PySpark (via JDBC) | Staging tables post-flatten: arrays explotados, deduplicación, syntactic clean (trim, empty→NULL). Sin nested arrays, sin normalización semántica. | `silver_raw.stg_accounts`, `silver_raw.stg_transactions`, `silver_raw.stg_loans` |
-| `silver` | dbt | Modelos limpios: cast de tipos (string→date, string→numeric), normalización semántica (casing, language mapping), constraints (`accepted_values`), flattening de objetos anidados (credit_info, digital_engagement). | `silver.dim_customers`, `silver.fct_transactions`, `silver.fct_loans` |
-
-**Razón:** la consigna define "Silver - PySpark" y "Silver - dbt" como dos sub-etapas con responsabilidades distintas (secciones 5.2 y 5.3). Separarlas físicamente en dos schemas explicita el contrato:
-- Gold lee solo de `silver.*` (dbt-clean), nunca de `silver_raw.*`
-- dbt silver lee de `silver_raw.*` y de `bronze.*` (para `credit_info` y `digital_engagement`, que son objetos no arrays y por eso no pasaron por Spark)
-- Spark nunca escribe en `silver.*`
-
-**Beneficio operativo:** si dbt silver explota en una corrida, `silver_raw` queda intacto y se puede re-correr dbt sin re-correr Spark. Aísla fallos por capa.
-
-**Variable de entorno:** `SPARK_TARGET_SCHEMA=silver_raw` en `.env` parametriza el destino de Spark. Cambiarlo afecta todos los scripts `flatten_*.py` simultáneamente.
-
-
-### División de responsabilidades por capa (refinado Día 8)
-
-| Capa | Responsabilidad | Ejemplos |
-|------|-----------------|----------|
-| **PySpark → `silver_raw`** | Syntactic cleaning | `trim()`, empty string → `NULL`, deduplicación, array flattening |
-| **dbt → `silver`** | Semantic normalization + dimensiones transversales | Cast de tipos, normalización de casing/traducciones, derivaciones aritméticas neutrales (`age`, `tenure_months`), constraints, **y buckets de uso transversal** (`age_bucket`, `tenure_bucket`) |
-| **dbt → `gold`** | Bucketing analítico específico + business logic | `risk_bucket`, `utilization_bucket`, `credit_score_bucket`, `days_past_due_bucket`, definiciones de revenue/delinquency, agregaciones por grano |
-
-**Por qué age_bucket y tenure_bucket viven en Silver y no en Gold:**
-
-Ambos son dimensiones de uso transversal: aparecen en al menos 3 marts (`mart_customer_360`, `mart_digital_engagement`, `mart_acquisition_trend`). Materializarlos una vez en `silver.dim_customer` evita duplicación de macros en todos los marts (DRY), y respeta la consigna que pide "Reusability and clarity of metrics". El argumento purista (que "todo bucket es analítico, por tanto vive en Gold") cede ante el argumento pragmático (que una dimensión consumida por múltiples marts se pre-calcula una vez).
-
-**Por qué risk/utilization/credit_score/dpd viven en Gold:**
-
-A diferencia de age/tenure, estos buckets son interpretaciones analíticas específicas con cortes basados en convenciones de industria (FICO para utilization y credit_score; buckets regulatorios para DPD; literal de la consigna Q9 para risk). Tienen menos uso transversal: risk_bucket aparece en `customer_360` y poco más; utilization_bucket solo en `customer_360`; credit_score_bucket solo donde se hace análisis por país (Q6); dpd_bucket solo en `loan_portfolio`. Pre-calcular en Silver lo que se usa una sola vez es over-engineering.
-
-**Heurística operativa para futuros buckets:**
-
-- ¿Lo usan 3+ marts? → Silver, como columna materializada en la dim.
-- ¿Lo usa 1-2 marts? → Gold, vía macro.
-- ¿Cambia frecuentemente la definición de negocio? → Gold (cambios baratos).
-- ¿Es estable y de uso muy general? → Silver (un solo lugar de verdad).
-
-
-## Día 8 — Diseño de Gold + primeros marts
-
-### Decisiones de modelado
-
-**1. Arquitectura: 8 marts (no 9, no 24)**
+### 1. Arquitectura: 8 marts cubriendo 24 preguntas
 
 Mapeo mart → preguntas:
 
@@ -1105,22 +1003,30 @@ Mapeo mart → preguntas:
 | `mart_account_mix` | country × account_type × currency | Q2, Q22 |
 | `mart_international_transfers` | currency_pair × month | Q19 |
 
-Cobertura: 24/24 preguntas. NO crear un mart por pregunta — la consigna evalúa "reusability and clarity of metrics" y "model design quality", lo cual penaliza redundancia.
+Cobertura: 24/24. **No** crear un mart por pregunta — la consigna evalúa "reusability and clarity of metrics" y "model design quality", lo cual penaliza redundancia.
 
-**2. Fusión `mart_credit_risk` → `mart_customer_360`**
+---
 
-Razón: el dataset es un único punto en el tiempo (no hay snapshots históricos). Dos marts con grano `customer` serían redundantes. `mart_customer_360` lleva el perfil + credit_score + utilization + risk_bucket en una sola tabla. Si en el futuro hubiera snapshots, se separaría en `dim_customer` + `fct_credit_risk_snapshot`.
+### 2. Fusión `mart_credit_risk` → `mart_customer_360`
 
-**3. Definición de revenue (la consigna pide definirlo)**
+Razón: el dataset es un único punto en el tiempo (no hay snapshots históricos). Dos marts con grano `customer` serían redundantes. `mart_customer_360` lleva perfil + credit_score + utilization + risk_bucket en una sola tabla. Si en el futuro hubiera snapshots, se separaría en `dim_customer` + `fct_credit_risk_snapshot`.
+
+---
+
+### 3. Definición de revenue (la consigna pide definirlo)
 
 `revenue = transaction_fees + interest_income`
 
-- `transaction_fees`: suma de `amount` en `silver.fct_transactions` donde `type = 'fee'` y `status = 'completed'`
-- `interest_income`: suma mensual de `(outstanding_balance × interest_rate / 12)` sobre loans con `status IN ('current','delinquent')` (loans activos generan interés; default y paid_off no)
+- **`transaction_fees`**: `SUM(amount)` en `silver.fct_transactions` donde `transaction_type = 'fee'` AND `status = 'completed'`.
+- **`interest_income`**: `SUM(outstanding_balance × interest_rate / 12)` sobre loans con `status IN ('current', 'delinquent')` (loans activos generan interés; default y paid_off no).
 
-Representa lo que el banco GANA, no el volumen transado. El volumen se reporta aparte como `transaction_volume` para no confundir Q1 (revenue) con Q15 (volume).
+Representa lo que el banco **gana**, no el volumen transado. El volumen se reporta aparte (`transaction_volume`) para no confundir Q1 (revenue) con Q15 (volume).
 
-**4. Definición de delinquency (la consigna pide definirlo)**
+**Hallazgo de DQ relacionado:** las fees del dataset tienen distribución `status` casi uniforme (~25% en cada uno de los 4 status), sugiriendo generador sintético sin lógica de negocio. En banca real `completed` debería ser ~95%. Por eso el filtro a `completed` es crítico: sin él, revenue queda inflado 4x.
+
+---
+
+### 4. Definición de delinquency (la consigna pide definirlo)
 
 Se confía en el campo `status` del dataset tal cual viene en `silver.dim_loan`/`silver.fct_loans`:
 - `current` — al día
@@ -1128,139 +1034,82 @@ Se confía en el campo `status` del dataset tal cual viene en `silver.dim_loan`/
 - `default` — incumplimiento
 - `paid_off` — saldado
 
-Razón: el dataset ya provee el status semánticamente. Los dbt tests verifican consistencia interna (`accepted_values` en `loan_status`). Inconsistencias entre `status` y `days_past_due`, si existen, se documentan pero no se corrigen en Gold — el origen es la verdad.
+Razón: el dataset ya provee el status semánticamente. Los dbt tests verifican consistencia interna (`accepted_values`). Inconsistencias entre `status` y `days_past_due`, si existen, se documentan pero no se corrigen en Gold — el origen es la verdad.
 
-**5. Buckets analíticos**
+---
+
+### 5. Buckets analíticos: distribución entre Silver y Gold
 
 | Dimensión | Buckets | Vive en | Justificación |
 |-----------|---------|---------|---------------|
-| age_bucket | 18-25, 26-35, 36-50, 51-65, 65+, under_18 (DQ flag) | **Silver** (`dim_customer`) | Uso transversal en 3+ marts. Pre-cálculo evita duplicación. |
-| tenure_bucket | new (<6m), established (6-24m), loyal (>24m) | **Silver** (`dim_customer`) | Uso transversal en 3+ marts. |
-| risk_bucket | low (0-30), medium (31-60), high (61-85), critical (86-100) | Gold (macro) | Literal Q9 → 4 niveles obligatorios. |
-| utilization_bucket | healthy (<30%), moderate (30-70%), high (>70%) | Gold (macro) | Regla FICO. Uso analítico específico. |
-| credit_score_bucket | poor (300-579), fair (580-669), good (670-739), very_good (740-799), exceptional (800-850) | Gold (macro) | Rangos FICO estándar. |
-| days_past_due_bucket | current (0), 1-30, 31-60, 61-90, 90+ | Gold (macro) | Buckets regulatorios de provisioning bancario. |
-| tenure_years | calculado decimal | Gold (macro auxiliar) | Para casos donde tenure como número se necesita además del bucket categórico. |
+| `age_bucket` | 18-25, 26-35, 36-50, 51-65, 65+, under_18 (DQ flag), unknown | **Silver** (`dim_customer`) | Uso transversal en 3+ marts. |
+| `tenure_bucket` | new (<6m), established (6-24m), loyal (>24m), unknown | **Silver** (`dim_customer`) | Uso transversal en 3+ marts. |
+| `risk_bucket` | low, medium, high, critical | Gold (macro `get_risk_bucket`) | Literal Q9 → 4 niveles obligatorios. |
+| `utilization_bucket` | healthy (<30%), moderate (30-70%), high (>70%) | Gold (macro `get_utilization_bucket`) | Regla FICO. |
+| `credit_score_bucket` | poor (300-579), fair (580-669), good (670-739), very_good (740-799), exceptional (800-850) | Gold (macro `get_credit_score_bucket`) | Rangos FICO estándar. |
+| `days_past_due_bucket` | current (0), 1-30, 31-60, 61-90, 90+ | Gold (macro `get_days_past_due_bucket`) | Buckets regulatorios de provisioning bancario. |
+| `tenure_years` | decimal calculado | Gold (macro auxiliar `get_tenure_years`) | Casos donde tenure como número complementa al bucket categórico. |
 
-### Refinamiento de principios
-
-**6. División de responsabilidades por capa (refinado)**
-
-El principio original "Spark = syntactic / dbt = semantic" se extiende a 3 niveles:
-
-| Capa | Responsabilidad | Ejemplos |
-|------|-----------------|----------|
-| **PySpark → `silver_raw`** | Syntactic cleaning | `trim()`, empty → NULL, dedup, array flattening |
-| **dbt → `silver`** | Semantic normalization + dimensiones transversales | Cast de tipos, normalización casing/traducciones, derivaciones aritméticas neutrales (`age`, `tenure_months`), buckets de uso transversal (`age_bucket`, `tenure_bucket`), constraints |
-| **dbt → `gold`** | Bucketing analítico específico + business logic | `risk_bucket`, `utilization_bucket`, `credit_score_bucket`, `days_past_due_bucket`, definiciones de revenue/delinquency, agregaciones por grano |
-
-**Heurística para futuros buckets:**
-- ¿Lo usan 3+ marts? → Silver, columna materializada.
+**Heurística operativa para ubicar futuros buckets:**
+- ¿Lo usan 3+ marts? → Silver, columna materializada en la dim.
 - ¿Lo usa 1-2 marts? → Gold, vía macro.
 - ¿Definición cambia frecuentemente? → Gold (cambios baratos).
 - ¿Estable y uso muy general? → Silver.
 
-**7. Sub-división del Silver layer: `silver_raw` vs `silver`**
+**Bucket de risk DECIMAL (rangos numéricos finos):** ver hallazgo #11 abajo sobre el bug de BETWEEN.
 
-El warehouse tiene **dos schemas** para Silver, no uno solo:
+---
+
+### 6. División de responsabilidades por capa (refinamiento a 3 niveles)
+
+El principio original "Spark = syntactic / dbt = semantic" se extiende a tres niveles tras Día 8:
+
+| Capa | Responsabilidad | Ejemplos |
+|------|-----------------|----------|
+| **PySpark → `silver_raw`** | Syntactic cleaning | `trim()`, empty → NULL, dedup, array flattening |
+| **dbt → `silver`** | Semantic normalization + dimensiones transversales | Cast de tipos, normalización casing/traducciones, derivaciones aritméticas neutrales (`age`, `tenure_months`), buckets de uso transversal, constraints |
+| **dbt → `gold`** | Bucketing analítico específico + business logic | `risk_bucket`, `utilization_bucket`, etc.; revenue, delinquency, agregaciones por grano de negocio |
+
+**Sub-división `silver_raw` vs `silver` (formalizada en Día 8):**
 
 | Schema | Responsable | Contenido |
 |--------|-------------|-----------|
 | `silver_raw` | PySpark (vía JDBC) | Staging post-flatten: arrays explotados, dedup, syntactic clean |
 | `silver` | dbt | Modelos limpios: cast de tipos, normalización semántica, flattening de objetos anidados, constraints |
 
-**Razón:** la consigna define "Silver - PySpark" y "Silver - dbt" como dos sub-etapas (secciones 5.2 y 5.3). Separarlas físicamente en dos schemas explicita el contrato:
-- Gold lee solo de `silver.*`, nunca de `silver_raw.*`
-- dbt silver lee de `silver_raw.*` y de `bronze.*` (para objetos no-array como `credit_info`)
-- Spark nunca escribe en `silver.*`
+Contrato resultante:
+- Gold lee solo de `silver.*`, nunca de `silver_raw.*`.
+- dbt silver lee de `silver_raw.*` y de `bronze.*` (para objetos no-array como `credit_info`).
+- Spark nunca escribe en `silver.*`.
 
-**Beneficio operativo:** si dbt silver explota en una corrida, `silver_raw` queda intacto y se puede re-correr dbt sin re-correr Spark. Aísla fallos por capa. Variable `SPARK_TARGET_SCHEMA=silver_raw` en `.env` parametriza el destino de Spark.
+**Beneficio operativo:** si dbt silver explota, `silver_raw` queda intacto y se puede re-correr dbt sin re-correr Spark. Aísla fallos por capa. Variable `SPARK_TARGET_SCHEMA=silver_raw` en `.env` parametriza el destino de Spark.
 
-**8. `silver.agg_customer_activity` como soporte estructural (no analítico)**
+---
 
-Esta tabla pre-agrega conteos puros (`accounts_count`, `transactions_count`, `loans_count`, `total_products`) por customer. Inicialmente sospeché que era un mart adelantado mal ubicado en Silver, pero al revisar: **solo contiene conteos estructurales, no métricas de negocio interpretadas**. Es análogo a `dim_date` — facilita downstream sin imponer interpretaciones. Para Q24 (avg products per customer by segment) evita 3 LEFT JOIN + COUNT DISTINCT en `mart_customer_360`.
+### 7. `silver.agg_customer_activity` como soporte estructural, no analítico
 
-Criterio: una agregación en Silver es legítima si solo cuenta/agrupa atributos estructurales del dataset (cardinalidad de relaciones). Una agregación que aplica reglas de negocio (revenue, delinquency rate, segment definitions) pertenece a Gold.
+Esta tabla pre-agrega conteos puros (`accounts_count`, `transactions_count`, `loans_count`, `total_products`) por customer. Día 8 confirmó que su lugar en Silver es correcto: **solo contiene conteos estructurales, no métricas de negocio interpretadas**. Análogo a `dim_date` — facilita downstream sin imponer interpretaciones. Para Q24 (avg products per segment) evita 3 LEFT JOIN + COUNT DISTINCT en cada mart consumidor.
 
-### Hallazgos de data quality del Día 8
+**Criterio general:** una agregación en Silver es legítima si solo cuenta/agrupa atributos estructurales del dataset (cardinalidad de relaciones). Una agregación que aplica reglas de negocio (revenue, delinquency rate, segment definitions) pertenece a Gold.
 
-**9. 183 cuentas activas con balance NULL (~3.1%)**
+---
 
-Descubierto durante validación cruzada de `mart_account_mix`. Distribución:
-- Uniforme entre los 4 account_types (savings 29, checking 27, investment 25, credit_card 23 en USD)
-- Aparece en las 8 currencies del dataset
-- Sin patrón de concentración → ruido de generación de dataset sintético
+### 8. Refactor Silver: `stg_credit_info` y `stg_digital_engagement` → `dim_*`
 
-**Tratamiento en Gold:** las 183 cuentas SE INCLUYEN en `accounts_count` (Q22 es sobre popularidad, no sobre balance) pero NO contribuyen a `total_balance`/`avg_balance` (SQL `SUM`/`AVG` ignoran NULL por definición). Se agregó columna `accounts_with_balance` al mart para exponer la discrepancia, haciendo la tasa de missing data queryable desde BI.
+**Contexto:** diseñando `mart_customer_360` se descubrió que `silver` tenía dos modelos con prefijo `stg_*` (legacy de un rename incompleto en Día 7). El resto de Silver ya seguía la convención `dim_*`/`fct_*`/`agg_*`. Esa asimetría se cerró:
 
-**Lección de modelado:** cuando se agrega una columna a un CTE intermedio en dbt, debe propagarse explícitamente en todos los CTEs downstream que hacen `SELECT enumerado`. Es la causa típica del bug "la columna existe en el archivo pero no en la tabla". `SELECT *` entre CTEs intermedios reduce este riesgo.
-
-**10. Multi-currency: no convertir, granular por currency**
-
-El dataset no incluye tabla de tasas FX. Sumar `balance` entre USD y ARS sería matemáticamente incorrecto. Decisión: marts que agregan balance llevan `currency` en el grano y se evita conversión inventada. Mejora futura: `dim_fx_rate` (manual o desde API) + `mart_balances_usd` consolidado.
-
-### Gotchas operativos (Windows/PowerShell)
-
-**11. `$env:VAR` vacías en sesiones nuevas de PowerShell**
-
-Las variables del `.env` solo se cargan en `docker compose`, NO en la sesión de PowerShell. Comandos del tipo `docker exec qversity_postgres psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "..."` fallan con `role "-d" does not exist` porque `$env:POSTGRES_USER` se expande a string vacío y `psql` reinterpreta los flags.
-
-**Solución portátil:** leer las envs desde adentro del container con comillas simples por fuera para evitar expansión prematura de PowerShell:
-
-```powershell
-docker exec qversity_postgres bash -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB -c "..."'
-```
-
-### Estado del día 8
-
-- ✅ 8 marts diseñados con mapeo a 24 preguntas
-- ✅ 5 macros de Gold creadas (`get_risk_bucket`, `get_utilization_bucket`, `get_credit_score_bucket`, `get_days_past_due_bucket`, `get_tenure_years`)
-- ✅ Macro duplicada (`get_age_bucket`) eliminada — se mantiene `age_bucket` original de Silver
-- ✅ `mart_acquisition_trend` validado (73 meses, suma cuadra con Silver, MoM growth funcional)
-- ✅ `mart_account_mix` validado (5,877 cuentas, multi-currency, columna DQ)
-- ✅ Config muerta de bronze en `dbt_project.yml` eliminada
-- ⏳ Pendiente: `mart_customer_360` (Día 9)
-
-
-**12. Hallazgo DQ: variantes boolean en digital_engagement**
-
-Descubierto al materializar `dim_digital_engagement` como table (antes era view, cast lazy enmascaraba el problema). Las 4 columnas booleanas del bloque `digital_engagement` en el JSON original contienen variantes no estándar:
-
-| Variante | Lenguaje/encoding | Filas afectadas (aprox) |
-|---|---|---|
-| `true`/`false` | Estándar | ~8,500 |
-| `yes`/`no` | Inglés casing | ~120 |
-| `si` | Español sin tilde | ~86 |
-| `0`/`1` | Numeric | ~118 |
-
-**Solución:** macro `safe_cast_boolean()` que normaliza estas variantes a `true`/`false`/`NULL`. Aplicada en `dim_digital_engagement`. **Análoga a `safe_cast_numeric`** del Día 6 — sigue el mismo patrón defensivo.
-
-**Lección arquitectónica:** convertir views Silver a tables expone bugs latentes de cast. View = cast lazy en read-time = bugs ocultos; table = cast eager en write-time = bugs explícitos. Materializar como table es **mejor para DQ** (no solo para performance).
-
-**Análisis de impacto:** `bankruptcy_flag` en `credit_info` es la única otra columna boolean en Silver — verificada limpia (solo `t`/`f`). No requiere fix.
-
-
-### Refactor Silver descubierto durante diseño de Gold (Día 8)
-
-Diseñando `mart_customer_360` se descubrió deuda técnica en Silver que se resolvió antes de seguir con Gold. Cuatro hallazgos:
-
-**13. Rename incompleto: `stg_credit_info` → `dim_credit_info`**
-
-En un día anterior se había renombrado el archivo `.sql` pero no se corrió `dbt run` ni se actualizó el YAML. Resultado: vista huérfana `silver.stg_credit_info` colgada en Postgres, modelo `dim_credit_info` registrado en el grafo dbt pero nunca materializado, tests del YAML apuntando al nombre viejo.
-
-Cleanup: drop view huérfana, edición de header del archivo, actualización de `_silver__stg.yml` línea 290, `dbt run --full-refresh`, `dbt test --select dim_credit_info` (9/9 PASS).
-
-**Lección operativa:** después de `git mv` de un modelo dbt, siempre seguir con `DROP` del objeto viejo en la DB + `dbt run` + actualizar `schema.yml`. Si no, queda inconsistencia entre código y warehouse.
-
-**14. Refactor simétrico: `stg_digital_engagement` → `dim_digital_engagement`**
-
-Para consistencia con `dim_credit_info` (mismo patrón de objeto 1:1 desde Bronze, mismo grano customer), se renombró también. Se materializó como `table` en vez de `view`. 7/7 tests PASS post-refactor.
+- **`stg_credit_info` → `dim_credit_info`**: rename de archivo, drop de view huérfana en Postgres, actualización del YAML, `materialized='table'`. 9/9 tests PASS.
+- **`stg_digital_engagement` → `dim_digital_engagement`**: idem. 7/7 tests PASS post-refactor.
 
 **Estado final de Silver:** todas las tablas con prefijo `dim_*`/`fct_*`/`agg_*`. Ninguna `stg_*` en el schema `silver` (las `stg_*` viven solo en `silver_raw`, output de Spark).
 
-**15. Hallazgo DQ crítico: variantes boolean en digital_engagement**
+**Lección operativa:** después de `git mv` de un modelo dbt, siempre seguir con `DROP` del objeto viejo en la DB + `dbt run --full-refresh` + actualizar `schema.yml`. Si no, queda inconsistencia silenciosa entre código y warehouse.
 
-Al materializar `dim_digital_engagement` como table (antes era view), Postgres explotó con `invalid input syntax for type boolean: "si"`. Las 4 columnas booleanas del bloque `digital_engagement` contienen variantes no estándar:
+---
+
+### 9. Hallazgo DQ: variantes boolean en digital_engagement
+
+Al materializar `dim_digital_engagement` como table (antes era view), Postgres explotó con `invalid input syntax for type boolean: "si"`. Las 4 columnas booleanas (`mobile_app_registered`, `web_banking_registered`, `push_notifications`, `paperless_statements`) contienen variantes no estándar:
 
 | Variante | Lenguaje/encoding | Filas afectadas |
 |---|---|---|
@@ -1269,10 +1118,111 @@ Al materializar `dim_digital_engagement` como table (antes era view), Postgres e
 | `si` | Español sin tilde | ~86 |
 | `0`/`1` | Numeric | ~118 |
 
-**Solución:** macro `safe_cast_boolean()` análoga a `safe_cast_numeric()` del Día 6. Normaliza variantes a `true`/`false`/`NULL`.
+**Solución:** macro `safe_cast_boolean()` análoga a `safe_cast_numeric()` del Día 6. Acepta `true/t/yes/y/sí/si/1` → `TRUE`, `false/f/no/n/0` → `FALSE`, todo lo demás → NULL.
 
-**Lección arquitectónica:** **convertir views Silver a tables expone bugs latentes de cast.** View = cast lazy en read-time = bugs ocultos hasta que alguien consulta la fila ofensiva. Table = cast eager en write-time = bugs explícitos al `dbt run`. Materializar como table es **mejor para DQ** (no solo para performance).
+**Lección arquitectónica:** **convertir views Silver a tables expone bugs latentes de cast.** View = cast lazy en read-time = bugs ocultos hasta que alguien consulta la fila ofensiva. Table = cast eager en write-time = bugs explícitos al `dbt run`. Materializar como table es mejor para DQ, no solo para performance.
 
 **Análisis de impacto cruzado:** `bankruptcy_flag` en `credit_info` es la única otra columna boolean en Silver. Verificada limpia (solo `t`/`f`). No requiere fix.
 
-**Principio derivado:** todo cast no-trivial desde JSON (numeric, boolean, date) debe usar macro defensiva con NULL fallback, no cast nativo `::tipo`. Macros disponibles: `safe_cast_numeric`, `safe_cast_boolean`, `parse_date_multi_format`. Casts nativos solo cuando los datos están demostrablemente limpios y el modelo es view (read-time, fail-fast aceptable).
+**Principio derivado:** todo cast no-trivial desde JSON (numeric, boolean, date) debe usar macro defensiva con NULL fallback, no cast nativo `::tipo`. Macros disponibles: `safe_cast_numeric`, `safe_cast_boolean`, `parse_date_multi_format`. Cast nativo solo cuando los datos están demostrablemente limpios y el modelo es view (read-time, fail-fast aceptable).
+
+---
+
+### 10. Hallazgo DQ: 183 cuentas activas con balance NULL (~3.1%)
+
+Descubierto durante validación cruzada de `mart_account_mix`. Distribución:
+- Uniforme entre los 4 account_types (savings 29, checking 27, investment 25, credit_card 23 en USD)
+- Aparece en las 8 currencies del dataset
+- Sin patrón de concentración → ruido de generación de dataset sintético
+
+**Tratamiento en Gold:** las 183 cuentas SE INCLUYEN en `accounts_count` (Q22 es sobre popularidad, no sobre balance) pero NO contribuyen a `total_balance`/`avg_balance` (SQL `SUM`/`AVG` ignoran NULL por definición). Columna nueva `accounts_with_balance` expone la discrepancia, haciendo la tasa de missing data queryable desde BI.
+
+**Lección de modelado:** cuando se agrega una columna a un CTE intermedio en dbt, debe propagarse explícitamente en todos los CTEs downstream que hacen `SELECT enumerado`. Es la causa típica del bug "la columna existe en el archivo pero no en la tabla". `SELECT *` entre CTEs intermedios reduce este riesgo.
+
+---
+
+### 11. Hallazgo: bug en `get_risk_bucket` — `BETWEEN` con decimales
+
+Descubierto al construir `mart_customer_360`. La macro original usaba `BETWEEN 0 AND 30`, `BETWEEN 31 AND 60`, etc. — patrón correcto para enteros pero **fatal con decimales**. Como `risk_score` es `numeric`, valores como 30.05, 30.08, 60.01, 85.01 caían en huecos entre buckets y se clasificaban como `'unknown'`. 147 customers (~3%) afectados.
+
+**Solución:** reemplazar `BETWEEN` con comparadores explícitos.
+
+```sql
+-- Antes (buggy con decimales):
+when {{ x }} between 0 and 30 then 'low'
+when {{ x }} between 31 and 60 then 'medium'
+
+-- Después (correcto):
+when {{ x }} >= 0  and {{ x }} <= 30 then 'low'
+when {{ x }} >  30 and {{ x }} <= 60 then 'medium'
+```
+
+**Convención adoptada:** bordes superiores inclusivos (`<=`), bordes inferiores exclusivos (`>`), excepto el primer bucket que usa `>=` para incluir 0.
+
+**Análisis cruzado de las otras macros de bucketing:**
+- `get_credit_score_bucket`: input `integer` (FICO scores enteros), `BETWEEN` funciona. ✅
+- `get_days_past_due_bucket`: input `integer`, `BETWEEN` funciona. ✅
+- `get_utilization_bucket`: input `numeric`, pero usa `<`/`>` sin BETWEEN — sin huecos. ✅
+
+**Lección general:** macros de bucketing con `BETWEEN` solo son seguras para inputs enteros. Para decimales: usar comparadores explícitos.
+
+---
+
+### 12. Multi-currency en `mart_account_mix`: no convertir, granular por currency
+
+El dataset no incluye tabla de tasas FX. Sumar `balance` entre USD y ARS sería matemáticamente incorrecto. Decisión: marts que agregan balance llevan `currency` en el grano y evitan conversión inventada. Mejora futura: `dim_fx_rate` (manual o desde API) + `mart_balances_usd` consolidado.
+
+Resultado en `mart_account_mix`: grano = `country × account_type × currency`. Q22 (popularidad por type) sale agregando por type. Q2 (balances por country) sale agregando por country mostrando currencies por país. El dashboard puede filtrar por moneda o mostrar lado a lado.
+
+---
+
+### 13. `mart_customer_360`: diseño completo
+
+**Grano:** 1 fila por customer.
+**Responde:** Q1 (revenue por segment), Q9 (risk buckets), Q10 (count by country/city), Q11 (age by segment), Q13 (status breakdown), Q14 (KYC distribution), Q24 (products per segment).
+
+**Sources (todos LEFT JOIN desde `dim_customer` para no perder customers):**
+- `silver.dim_customer` — identity, demographics, segment, age_bucket, tenure_bucket
+- `silver.dim_credit_info` — credit_score, utilization, late_payments, bankruptcy_flag
+- `silver.dim_digital_engagement` — mobile_app, web_banking
+- `silver.agg_customer_activity` — accounts_count, loans_count, transactions_count, total_products (Q24)
+- `silver.fct_transactions` + `silver.dim_account` — `total_fees_paid` (only `status='completed'`)
+- `silver.fct_loans` — `monthly_interest_income` (only `status IN ('current','delinquent')`)
+
+**Columnas finales (30):** identity (1) + demographics (5) + relationship (5) + risk (2) + credit profile (8) + digital (2) + products (4) + revenue (3).
+
+**Decisiones críticas:**
+- **LEFT JOIN siempre desde `dim_customer`:** no perdemos customers por falta de credit_info/digital/loans/transactions. Q10/Q13/Q14 mantienen universo completo.
+- **`COALESCE(..., 0)` en counts y revenue:** customer sin transactions tiene `total_fees_paid = 0`, no NULL. Simplifica agregaciones en PowerBI.
+- **NO usar `COALESCE` en credit_score/utilization_pct:** NULL ahí significa "dato no validable" (diferente de cero). PowerBI los filtra naturalmente.
+- **`WHERE risk_score IS NOT NULL` como safeguard defensivo:** dataset actual no tiene NULLs, pero protege futuros loads.
+
+---
+
+### 14. Tests dbt para Gold: 65 tests creados, todos PASS
+
+`dbt/models/gold/_gold__mart.yml` cubre los 3 marts del día con:
+- `unique` + `not_null` en PKs.
+- `relationships` desde `mart_customer_360.customer_id` → `dim_customer.customer_id`.
+- `accepted_values` en todas las categóricas: country, account_type, currency, customer_segment, kyc_status, status, age_bucket, tenure_bucket, risk_bucket, credit_score_bucket, utilization_bucket.
+- `dbt_utils.expression_is_true` para invariantes numéricos (no-negativos, rangos válidos).
+
+**`accepted_values` de `risk_bucket`** intencionalmente NO incluye `'unknown'` — si aparece en algún run futuro, indica regresión en la macro `get_risk_bucket` (ver hallazgo #11).
+
+**Lección sobre `dbt_utils.expression_is_true` a nivel de columna:** la macro auto-prefija el nombre de la columna antes de la expression. Patrones tipo `"col_x is null or col_x between 0 and 100"` generan SQL inválido (`where not(col_x col_x is null or...)`). **Solución:** mover esos tests a nivel de modelo (`tests:` hermano de `columns:`), donde la expression no se auto-prefija.
+
+---
+
+### 15. Gotcha operativa: `$env:VAR` vacías en sesiones nuevas de PowerShell
+
+Las variables del `.env` solo se cargan en `docker compose`, NO en la sesión de PowerShell. Comandos como `docker exec qversity_postgres psql -U $env:POSTGRES_USER -d $env:POSTGRES_DB -c "..."` fallan con `role "-d" does not exist` porque `$env:POSTGRES_USER` se expande a string vacío y `psql` reinterpreta los flags.
+
+**Solución portátil:** leer las envs desde adentro del container con comillas simples por fuera:
+
+```powershell
+docker exec qversity_postgres bash -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB -c "..."'
+```
+
+Las comillas simples evitan que PowerShell expanda `$POSTGRES_USER` antes de mandar el comando al container; bash adentro del container sí tiene las envs cargadas.
+
+---
