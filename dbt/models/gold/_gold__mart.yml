@@ -256,8 +256,21 @@ models:
           - dbt_utils.expression_is_true:
               expression: ">= 0"
 
-      - name: total_fees_paid
-        description: "Revenue from completed fee transactions. Per decisions.md Day 8."
+      - name: total_fees_paid_lifetime
+        description: |
+          Lifetime cumulative fees paid by the customer (completed fees only).
+          Preserved for auditability. For monthly revenue calculations,
+          use monthly_fee_revenue instead. See decisions.md Day 9.
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: monthly_fee_revenue
+        description: |
+          Monthly fee revenue = total_fees_paid_lifetime / tenure_months.
+          Customers with tenure_months=0 receive 0 via COALESCE.
+          See decisions.md Day 9 on temporal consistency fix.
         tests:
           - not_null
           - dbt_utils.expression_is_true:
