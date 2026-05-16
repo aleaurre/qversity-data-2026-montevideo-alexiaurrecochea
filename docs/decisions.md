@@ -1387,3 +1387,30 @@ would be classified as domestic, which is acceptable for revenue
 attribution purposes but not for AML reporting.
 
 ---
+
+### Bug found: temporal scale mismatch in revenue
+
+After fixing the interest_rate scale (100x), the revenue numbers were
+still 1-2 orders of magnitude too high: ~$19k/customer/month in USD,
+where banking benchmarks suggest ~$50-500/customer/month.
+
+Root cause: `total_revenue_monthly` summed `total_fees_paid` (lifetime
+cumulative) with `monthly_interest_income` (single month projection),
+mixing temporal scales. The fees component dominated by an order of
+magnitude proportional to `tenure_months`.
+
+**Fix:** normalize fees to monthly average by dividing by tenure_months.
+The renamed `monthly_fee_revenue = total_fees_paid_lifetime / tenure_months`
+provides temporal consistency. The lifetime cumulative is preserved as
+`total_fees_paid_lifetime` for auditability.
+
+**Lesson:** when summing metrics, verify all components share the same
+temporal grain. Add invariant tests on magnitude (e.g., revenue per
+customer in a sensible range) to catch this class of bug.
+
+**Edge case handled:** ~0.9% of customers (45 of 5,000) have 
+`tenure_months = 0` (registered in the most recent load). For these, 
+`monthly_fee_revenue = NULLIF / 0` would yield NULL and exclude them 
+from segment averages. We use `COALESCE(..., 0)` to attribute zero 
+monthly revenue to these customers — conceptually correct (no time 
+to accumulate fees yet) and preserves the population count in aggregates.
