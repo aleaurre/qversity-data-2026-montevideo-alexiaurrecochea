@@ -1226,3 +1226,164 @@ docker exec qversity_postgres bash -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB -c
 Las comillas simples evitan que PowerShell expanda `$POSTGRES_USER` antes de mandar el comando al container; bash adentro del container sí tiene las envs cargadas.
 
 ---
+
+## Business definitions for Gold marts
+
+These decisions are upstream of all six Gold marts built on Day 9. Each one
+is a deliberate trade-off between simplicity, professional defensibility,
+and dashboard expressiveness. The rationale is preserved here so the
+choice can be re-evaluated if business context changes.
+
+### 1. Revenue
+
+`revenue = fee_income + interest_income_accrued`
+
+- `fee_income = SUM(transactions.amount)` where `type = 'fee' AND status = 'completed'`
+  Only completed fees count; failed/reversed/pending are excluded.
+- `interest_income_accrued (monthly) = SUM(loans.outstanding_balance * interest_rate / 12)`
+  where `loans.status IN ('current', 'delinquent')`.
+  `paid_off` and `default` loans do not accrue (the former is settled,
+  the latter would move to non-accrual in real banking accounting).
+
+**Trade-off documented:** interchange fees (merchant commissions on card
+transactions) are excluded because the dataset has no field for them.
+This would be a real revenue component in a production bank.
+
+### 2. Delinquency
+
+Two non-exclusive flags, both derived from `days_past_due` (not `status`):
+
+- `is_delinquent = days_past_due >= 30` — operational/collections metric
+- `is_default    = days_past_due >= 90 OR status = 'default'` — regulatory (Basel/IFRS9 standard)
+
+**DPD takes precedence over the `status` field** in case of conflict
+(e.g., status='current' but DPD=45). The model emits a count of such
+conflicts as a soft warning, without failing the build.
+
+### 3. Days past due buckets
+
+Six aging buckets aligned with standard banking convention. Numeric
+prefixes ensure correct alphabetical ordering in Power BI visuals.
+
+| Bucket label             | DPD range  |
+|--------------------------|------------|
+| `00 - Current`           | 0          |
+| `01 - Early (1-29)`      | 1-29       |
+| `02 - 30-59 DPD`         | 30-59      |
+| `03 - 60-89 DPD`         | 60-89      |
+| `04 - 90-179 DPD`        | 90-179     |
+| `05 - 180+ DPD`          | 180+       |
+
+Cuts at 30/60/90/180 match IFRS9 and common charge-off thresholds.
+
+### 4. Credit utilization buckets
+
+Six buckets. NULLs aisolated, over-100% explicitly separated (since EDA
+confirmed real values > 100% in the source data — these represent
+financial stress, not corruption).
+
+| Bucket label                | Utilization range |
+|-----------------------------|-------------------|
+| `01 - Healthy (<30%)`       | < 30              |
+| `02 - Moderate (30-60%)`    | 30-60             |
+| `03 - High (60-90%)`        | 60-90             |
+| `04 - Maxed (90-100%)`      | 90-100            |
+| `05 - Over-limit (>100%)`   | > 100             |
+| `99 - Unknown`              | NULL              |
+
+### 5. Credit score buckets
+
+FICO convention (industry standard). Seven values total: silver retains
+out-of-range values as-is (already cast to int), so the Gold mart aisolates
+them in a dedicated `00 - Invalid` bucket rather than letting them
+contaminate `01 - Poor` or `05 - Excellent`.
+
+| Bucket label                  | Score range                       |
+|-------------------------------|-----------------------------------|
+| `00 - Invalid (out of range)` | NOT BETWEEN 300 AND 850           |
+| `01 - Poor (300-579)`         | 300-579                           |
+| `02 - Fair (580-669)`         | 580-669                           |
+| `03 - Good (670-739)`         | 670-739                           |
+| `04 - Very Good (740-799)`    | 740-799                           |
+| `05 - Excellent (800-850)`    | 800-850                           |
+| `99 - Unknown`                | NULL                              |
+
+### 6. Age buckets
+
+Neutral decade-based ranges. The project brief uses the neutral phrase
+"age group" (Q21), and generational labels (Gen Z, Millennial...) have
+contested cutoffs depending on the source (Pew vs Strauss-Howe etc.),
+so neutral bins are preferred.
+
+| Bucket label    | Age range |
+|-----------------|-----------|
+| `01 - 18-24`    | 18-24     |
+| `02 - 25-34`    | 25-34     |
+| `03 - 35-44`    | 35-44     |
+| `04 - 45-54`    | 45-54     |
+| `05 - 55-64`    | 55-64     |
+| `06 - 65+`      | 65+       |
+| `99 - Unknown`  | NULL      |
+
+`age` is already derived in silver from `date_of_birth`.
+
+### 7. Currency strategy
+
+Hybrid: **five marts in local currency, one mart in USD.**
+
+- `mart_transactions_summary`, `mart_loan_portfolio`, `mart_credit_risk`,
+  `mart_digital_engagement`, `mart_international_transfers` operate in
+  the original (local) currency. Most of them are not monetary
+  (engagement, risk buckets) or are naturally segmented by country/currency
+  (loans, transfers).
+- `mart_revenue_by_segment_usd` applies FX conversion to USD. Required
+  because revenue-per-segment crosses countries and demands a common unit.
+
+**Infrastructure (shared):**
+- `seeds/fx_rates.csv` — currency → `rate_to_usd`, as_of_date
+- `seeds/country_currency.csv` — ISO country code → local currency code
+- Macro `{{ to_usd(amount, currency) }}` — wraps the FX lookup
+
+**FX rates (mid-market snapshot, May 2026):**
+
+| Currency | rate_to_usd |
+|----------|-------------|
+| USD      | 1.000000    |
+| ARS      | 0.000717    |
+| UYU      | 0.024850    |
+| COP      | 0.000264    |
+| MXN      | 0.058000    |
+| CLP      | 0.001127    |
+| PEN      | 0.270000    |
+| BRL      | 0.200000    |
+
+Sources: Xe.com, exchange-rates.org, tradingeconomics.com (May 2026).
+In production this would be replaced by a daily FX feed.
+
+**Insight from EDA (documented, not blocking):** the dataset shows
+~50% USD-denominated activity across the LATAM region, reflecting
+real-world dollarization patterns (notably UY and AR). This is a
+business finding, not a data quality issue.
+
+### 8. International transfer
+
+`is_international = (type = 'transfer'
+                     AND tx_currency != account_currency
+                     AND tx_currency != customer_country_currency)`
+
+The strictest of three considered definitions: a transfer is only
+international if its currency differs from **both** the originating
+account's currency **and** the customer's home country currency. This
+minimizes false positives (e.g., a Uruguayan with a USD account sending
+USD to another USD account is correctly classified as domestic).
+
+The country→currency mapping is materialized as a seed
+(`seeds/country_currency.csv`) to keep the logic out of the model SQL
+and consistent with the FX seed pattern.
+
+**Limitation documented:** without destination account data, this is
+still a proxy. A cross-border USD-to-USD transfer that requires no FX
+would be classified as domestic, which is acceptable for revenue
+attribution purposes but not for AML reporting.
+
+---
