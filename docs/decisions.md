@@ -1414,3 +1414,46 @@ customer in a sensible range) to catch this class of bug.
 from segment averages. We use `COALESCE(..., 0)` to attribute zero 
 monthly revenue to these customers — conceptually correct (no time 
 to accumulate fees yet) and preserves the population count in aggregates.
+
+### Data scope expansion: EUR added to FX seed
+
+When validating mart_tx_by_channel/category/dow against fx_rates via 
+relationships test, dbt flagged 924 transactions denominated in EUR 
+(~1.8% of total volume). The original seed scope was LATAM-only based 
+on the project brief, but the dataset legitimately includes EUR 
+transactions (likely expat or international clients).
+
+**Fix:** EUR added to fx_rates.csv at 1.16 USD (mid-market, May 2026, 
+source Xe.com). Seed `accepted_values` test updated accordingly.
+
+**Lesson:** the `relationships` test on currency was effective — it 
+surfaced a real data scope gap before reaching downstream marts.
+
+
+### Finding: synthetic data shows abnormal DPD distribution
+
+mart_loan_dpd reveals that the source dataset has an unusual DPD profile:
+  - Exactly 50.5% of loans at DPD=0 ('Current')
+  - The remaining ~49.5% are distributed across delinquency buckets with
+    a slight skew toward shorter durations (avg DPD of the delinquent
+    subset ≈ 134 days, not exactly uniform).
+
+In real LATAM banking, the expected pattern is:
+  - 70-85% Current
+  - Exponential decay across DPD buckets (most late payers cure quickly)
+  - <2% in 180+ DPD (charge-off threshold in most jurisdictions)
+
+Hypothesis: the data generator assigns DPD=0 to half the population
+(approximating performing loans) but samples the remainder from a 
+biased-uniform distribution rather than modeling true delinquency
+dynamics. This produces a portfolio that would be insolvent in reality
+(~16-18% in 180+ DPD across loan types).
+
+**Decision:** keep the bucketing aligned with IFRS9/Basel convention
+(decisions.md §3). Document the divergence as a business-readable insight
+in Power BI (Page 3: Risk & Credit). The metrics are computed correctly;
+the unrealistic distribution is a property of the synthetic data source.
+
+Pattern consistent with the revenue-by-segment flatness finding (Mart 1):
+the generator does not correlate financial dimensions (DPD, loan amount,
+revenue) with customer segments or loan types in realistic ways.
