@@ -53,6 +53,9 @@ models:
     silver:
       +materialized: table
       +schema: silver
+    intermediate:
+      +schema: silver         # convención: viven con silver en la DB
+      +materialized: view     # default para todos los int_ porque son solo para organizar el proyecto, no tienen lógica propia
     gold:
       +materialized: table
       +schema: gold
