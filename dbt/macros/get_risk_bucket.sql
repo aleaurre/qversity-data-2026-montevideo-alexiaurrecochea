@@ -1,9 +1,9 @@
 {% macro get_risk_bucket(risk_score_column) %}
-    CASE
-        WHEN {{ risk_score_column }} BETWEEN 0 AND 30 THEN 'low'
-        WHEN {{ risk_score_column }} BETWEEN 31 AND 60 THEN 'medium'
-        WHEN {{ risk_score_column }} BETWEEN 61 AND 85 THEN 'high'
-        WHEN {{ risk_score_column }} BETWEEN 86 AND 100 THEN 'critical'
-        ELSE 'unknown'
-    END
+    case
+        when {{ risk_score_column }} >= 0  and {{ risk_score_column }} <= 30  then 'low'
+        when {{ risk_score_column }} >  30 and {{ risk_score_column }} <= 60  then 'medium'
+        when {{ risk_score_column }} >  60 and {{ risk_score_column }} <= 85  then 'high'
+        when {{ risk_score_column }} >  85 and {{ risk_score_column }} <= 100 then 'critical'
+        else 'unknown'
+    end
 {% endmacro %}

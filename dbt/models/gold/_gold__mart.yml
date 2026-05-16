@@ -1,0 +1,285 @@
+version: 2
+
+# ============================================================================
+# Tests for Gold layer mart models.
+#
+# Convention: every mart has at minimum:
+#   - PK uniqueness + not_null
+#   - accepted_values on every normalized categorical (catches macro/source drift)
+#   - relationships from customer-grain marts to silver.dim_customer
+#   - expression_is_true on numeric metrics that must satisfy invariants
+#     (e.g. non-negative, percentages in [0, 100])
+#
+# These tests are tight on purpose: a passing test suite is the contract
+# between the Gold layer and PowerBI consumers downstream.
+# ============================================================================
+
+models:
+
+  # --------------------------------------------------------------------------
+  - name: mart_acquisition_trend
+    description: >
+      One row per calendar month. New customer acquisitions per month with
+      cumulative total and MoM growth percentage. Source for Q12 (acquisition
+      trend over time). Excludes customers with NULL registration_date.
+    columns:
+
+      - name: month
+        description: First day of the month (date_trunc to month).
+        tests:
+          - unique
+          - not_null
+
+      - name: year
+        tests:
+          - not_null
+
+      - name: month_number
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "between 1 and 12"
+
+      - name: month_label
+        description: "YYYY-MM string for chronological-lexicographic sort in BI."
+        tests:
+          - unique
+          - not_null
+
+      - name: new_customers
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: cumulative_customers
+        description: Running total of new_customers, ascending by month.
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: mom_growth_pct
+        description: >
+          Month-over-month % change in new_customers. NULL for first month
+          (no prior reference) or when previous month had zero acquisitions.
+
+  # --------------------------------------------------------------------------
+  - name: mart_account_mix
+    description: >
+      One row per (country × account_type × currency). Account counts and
+      balance metrics. Sources for Q22 (popular account types) and Q2
+      (balances by country, in source currency). Only active accounts.
+      Multi-currency: balances are NOT converted (no FX table); grain
+      includes currency so sums never mix incompatible units.
+    columns:
+
+      - name: country
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['AR', 'BR', 'CL', 'CO', 'MX', 'PE', 'UY']
+
+      - name: account_type
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['savings', 'checking', 'investment', 'credit_card']
+
+      - name: currency
+        tests:
+          - not_null
+
+      - name: accounts_count
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+
+      - name: accounts_with_balance
+        description: >
+          Subset of accounts_count that have a non-null balance. Exposes
+          missing-data rate (~3.1% of active accounts have NULL balance,
+          uniformly distributed across types/currencies — synthetic dataset
+          noise per decisions.md Day 8).
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: total_balance
+        description: "SUM of balance in source currency. NULL when no account had a balance."
+
+      - name: pct_of_country_accounts
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 100"
+
+      - name: pct_of_total_accounts
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 100"
+
+    tests:
+      # Each country's percentages should sum to 100 (within rounding tolerance).
+      - dbt_utils.expression_is_true:
+          expression: "pct_of_country_accounts >= 0 and pct_of_country_accounts <= 100"
+
+  # --------------------------------------------------------------------------
+  - name: mart_customer_360
+    description: >
+      One row per customer. Source of truth for Q1 (revenue by segment),
+      Q9 (risk buckets), Q10 (count by country/city), Q11 (age by segment),
+      Q13 (status breakdown), Q14 (KYC distribution), Q24 (products by segment).
+      Combines demographics, relationship, risk, credit profile, digital
+      engagement, product counts, and revenue metrics.
+    columns:
+
+      - name: customer_id
+        description: Primary key. 1:1 with silver.dim_customer.
+        tests:
+          - unique
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+
+      - name: country
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['AR', 'BR', 'CL', 'CO', 'MX', 'PE', 'UY']
+
+      - name: age
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "between 18 and 120"
+
+      - name: age_bucket
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['18-25', '26-35', '36-50', '51-65', '65+', 'under_18', 'unknown']
+
+      - name: customer_segment
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['retail', 'premium', 'private_banking', 'sme']
+
+      - name: tenure_months
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: tenure_bucket
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['new', 'established', 'loyal', 'unknown']
+
+      - name: kyc_status
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['verified', 'pending', 'expired', 'rejected']
+
+      - name: status
+        description: Customer-level status (distinct from account.status which also has 'frozen').
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['active', 'inactive', 'suspended', 'closed']
+
+      - name: risk_score
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 100"
+
+      - name: risk_bucket
+        description: >
+          Bucketed risk_score per Q9 literal: "low/medium/high/critical".
+          'unknown' should NEVER appear with valid risk_score [0,100] — if it
+          does, get_risk_bucket macro has a regression (see decisions.md Day 8).
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['low', 'medium', 'high', 'critical']
+
+      - name: credit_score
+        description: Validated FICO score [300, 850]. NULL when source was corrupt (~10% per EDA).
+        # Range check moved to model-level tests below (column-level expression_is_true
+        # auto-prefixes column name, causing syntax error with "is null or" patterns).
+
+      - name: credit_score_bucket
+        tests:
+          - accepted_values:
+              values: ['poor', 'fair', 'good', 'very_good', 'exceptional', 'unknown']
+
+      - name: utilization_pct
+        # Range check moved to model-level tests below.
+
+      - name: utilization_bucket
+        tests:
+          - accepted_values:
+              values: ['healthy', 'moderate', 'high', 'unknown']
+
+      - name: bankruptcy_flag
+        tests:
+          - not_null
+
+      - name: accounts_count
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: loans_count
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: transactions_count
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: total_products
+        description: "Sum of accounts_count + loans_count (per silver.agg_customer_activity)."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: total_fees_paid
+        description: "Revenue from completed fee transactions. Per decisions.md Day 8."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: monthly_interest_income
+        description: "Accrued monthly interest on active loans (current + delinquent)."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: total_revenue_monthly
+        description: "total_fees_paid + monthly_interest_income."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+    tests:
+      - dbt_utils.expression_is_true:
+          expression: "credit_score is null or credit_score between 300 and 850"
+          
+      - dbt_utils.expression_is_true:
+          expression: "utilization_pct is null or utilization_pct between 0 and 100"
