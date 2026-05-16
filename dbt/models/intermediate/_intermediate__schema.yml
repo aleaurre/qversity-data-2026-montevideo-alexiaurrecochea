@@ -1,0 +1,79 @@
+version: 2
+
+models:
+  - name: int_loan_portfolio_metrics
+    description: |
+      Loan-grain analytics base with delinquency flags, DPD bucket, and
+      monthly accrued interest pre-computed. Consumed by mart_loan_dpd and
+      mart_loan_composition. Materialized as view (small input, no caching benefit).
+      Business logic centralization point for all loan portfolio gold marts.
+      See decisions.md Day 9 §2, §3.
+    columns:
+      - name: loan_id
+        description: "PK from fct_loans, preserved grain."
+        tests:
+          - unique
+          - not_null
+      
+      - name: customer_id
+        description: "FK to dim_customer."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+      
+      - name: loan_type
+        description: "Loan type (personal, mortgage, auto, education, business)."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['personal', 'mortgage', 'auto', 'education', 'business']
+      
+      - name: status
+        description: "Loan status (current, delinquent, default, paid_off)."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['current', 'delinquent', 'default', 'paid_off']
+      
+      - name: currency
+        description: "ISO 4217 currency code."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('fx_rates')
+              field: currency
+      
+      - name: is_delinquent
+        description: "DPD >= 30. Collections operational metric."
+        tests:
+          - not_null
+      
+      - name: is_default
+        description: "DPD >= 90 OR status='default'. Basel/IFRS9 regulatory metric."
+        tests:
+          - not_null
+      
+      - name: dpd_bucket
+        description: "6-bucket DPD aging (decisions.md Day 9 §3)."
+        tests:
+          - not_null
+          - accepted_values:
+              values:
+                - '00 - Current'
+                - '01 - Early (1-29)'
+                - '02 - 30-59 DPD'
+                - '03 - 60-89 DPD'
+                - '04 - 90-179 DPD'
+                - '05 - 180+ DPD'
+      
+      - name: monthly_interest_accrued
+        description: |
+          Monthly interest in native currency. 0 for inactive loans 
+          (paid_off, default) and for loans with NULL balance or rate.
+          Uses interest_rate_decimal (decisions.md Day 9 §1 fix).
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
