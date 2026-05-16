@@ -32,6 +32,13 @@
 --     incluye days_past_due > 0. Diferido. (BQ 5, 8).
 --   - delinquency_bucket por days_past_due: bucketing es lógica de negocio,
 --     vive en gold.
+--
+-- Derivaciones sintácticas adicionales:
+--   - interest_rate_decimal: la columna interest_rate en la data fuente viene
+--     en escala porcentual (e.g., 19.3 significa 19.3% anual). Para evitar
+--     que cada mart en gold tenga que recordar la convención y dividir por
+--     100, se expone una columna decimal pre-calculada (0.193). El campo
+--     original se preserva para auditabilidad. Ver decisions.md día 9.
 -- =============================================================================
 
 WITH src AS (
@@ -43,6 +50,7 @@ WITH src AS (
         principal,
         outstanding_balance,
         interest_rate,
+        interest_rate / 100.0 AS interest_rate_decimal,
         term_months,
         monthly_payment,
         start_date,
@@ -74,6 +82,7 @@ SELECT
     principal,
     outstanding_balance,
     interest_rate,
+    interest_rate_decimal,
     monthly_payment,
 
     -- State

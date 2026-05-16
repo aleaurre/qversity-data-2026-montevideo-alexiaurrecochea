@@ -144,11 +144,23 @@ models:
 
       - name: interest_rate
         description: |
-          Tasa de interés anual. Puede tener NULLs por DQ del generator.
-          Test severity=warn.
+          Tasa de interés anual en escala porcentual (e.g., 19.3 = 19.3%).
+          Preservada en escala original para auditabilidad. Para cálculos 
+          financieros downstream, usar interest_rate_decimal.
+          Puede tener NULLs por DQ del generator. Test severity=warn.
         tests:
           - not_null:
               severity: warn
+
+      - name: interest_rate_decimal
+        description: |
+          Tasa de interés anual en escala decimal (e.g., 0.193 = 19.3%).
+          Derivada como interest_rate / 100. Usar esta columna en cálculos
+          de gold para evitar errores de escala. Documentado en decisions.md día 9.
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "interest_rate_decimal = interest_rate / 100.0"
+              where: "interest_rate is not null"
 
       - name: days_past_due
         description: Días de atraso en el pago.
