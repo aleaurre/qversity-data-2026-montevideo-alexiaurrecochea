@@ -57,6 +57,20 @@ models:
       +materialized: table
       +schema: gold
 
+
+seeds:
+  qversity:  
+    +schema: silver  # las seeds son data de referencia, viven en silver
+    fx_rates:
+      +column_types:
+        currency: varchar(3)
+        rate_to_usd: numeric(18,8)
+        as_of_date: date
+    country_currency:
+      +column_types:
+        country_code: varchar(2)
+        currency_code: varchar(3)
+
 # Variables — we'll add more here as Silver/Gold expand. For day 5 there's
 # nothing to parameterize yet.
 vars: {}

@@ -1,0 +1,46 @@
+version: 2
+
+seeds:
+  - name: fx_rates
+    description: >
+      USD exchange rates per currency. Mid-market snapshot, May 2026.
+      Sources: Xe.com, exchange-rates.org, tradingeconomics.com.
+      In production this would be replaced by a daily FX feed.
+    columns:
+      - name: currency
+        description: "ISO 4217 currency code (3 letters)"
+        tests:
+          - unique
+          - not_null
+          - accepted_values:
+              values: ['USD', 'ARS', 'UYU', 'COP', 'MXN', 'CLP', 'PEN', 'BRL']
+      - name: rate_to_usd
+        description: "Multiplier to convert from this currency to USD"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: as_of_date
+        description: "Snapshot date of the FX rate"
+        tests:
+          - not_null
+
+  - name: country_currency
+    description: >
+      ISO country code to local currency code mapping for the LATAM
+      countries in scope (CO, UY, AR, MX, CL, PE, BR).
+    columns:
+      - name: country_code
+        description: "ISO 3166-1 alpha-2 country code"
+        tests:
+          - unique
+          - not_null
+          - accepted_values:
+              values: ['CO', 'UY', 'AR', 'MX', 'CL', 'PE', 'BR']
+      - name: currency_code
+        description: "ISO 4217 currency code for the country's main currency"
+        tests:
+          - not_null
+          - relationships:
+              to: ref('fx_rates')
+              field: currency
