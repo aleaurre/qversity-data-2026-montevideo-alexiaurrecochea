@@ -364,3 +364,128 @@ models:
 
       - name: fee_revenue_share
         description: "Share of revenue from fees vs interest. NULL when total revenue is 0."
+  
+  - name: mart_tx_by_channel
+    description: >
+      Q3, Q17, Q18 — Transaction summary by channel and currency.
+      Includes counts (total, completed, failed), value metrics (total, avg)
+      on completed transactions only, and failed_rate. See Q3, Q17, Q18.
+    columns:
+      - name: channel
+        description: "Transaction channel: mobile / web / atm / branch / pos"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['mobile', 'web', 'atm', 'branch', 'pos']
+      
+      - name: currency
+        description: "ISO 4217 currency code"
+        tests:
+          - not_null
+          - relationships:
+              to: ref('fx_rates')
+              field: currency
+      
+      - name: tx_count
+        description: "Total transactions in this (channel, currency) bucket"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      
+      - name: completed_tx_count
+        description: "Transactions with status = completed"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      
+      - name: failed_tx_count
+        description: "Transactions with status = failed (is_failed flag)"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      
+      - name: total_value
+        description: "Sum of amounts for completed transactions only"
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: ">= 0 or total_value is null"
+      
+      - name: avg_ticket
+        description: "Average amount of completed transactions"
+      
+      - name: failed_rate
+        description: "Failed/total ratio. Between 0 and 1."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 1"
+
+  - name: mart_tx_by_category
+    description: >
+      Q15 — Transaction summary by category and currency. Counts (total,
+      completed) and value metrics (total, avg) on completed transactions.
+    columns:
+      - name: category
+        description: "Transaction category (salary, groceries, rent, etc.)"
+        tests:
+          - not_null
+      
+      - name: currency
+        description: "ISO 4217 currency code"
+        tests:
+          - not_null
+          - relationships:
+              to: ref('fx_rates')
+              field: currency
+      
+      - name: tx_count
+        description: "Total transactions in this (category, currency) bucket"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      
+      - name: completed_tx_count
+        description: "Transactions with status = completed"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+  - name: mart_tx_by_dow
+    description: >
+      Q16 — Transaction volume by day of week and currency. Includes
+      day_of_week_name for direct labeling in Power BI. Numeric day_of_week
+      preserved for ordering (Postgres convention: Sunday=0, Saturday=6).
+    columns:
+      - name: day_of_week
+        description: "Numeric day of week (Postgres DOW: Sunday=0, Saturday=6)"
+        tests:
+          - not_null
+          - accepted_values:
+              values: [0, 1, 2, 3, 4, 5, 6]
+      
+      - name: day_of_week_name
+        description: "Day name for display"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+      
+      - name: currency
+        description: "ISO 4217 currency code"
+        tests:
+          - not_null
+          - relationships:
+              to: ref('fx_rates')
+              field: currency
+      
+      - name: tx_count
+        description: "Total transactions in this (day_of_week, currency) bucket"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
