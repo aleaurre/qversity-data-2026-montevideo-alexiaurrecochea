@@ -296,3 +296,71 @@ models:
           
       - dbt_utils.expression_is_true:
           expression: "utilization_pct is null or utilization_pct between 0 and 100"
+
+  - name: mart_revenue_by_segment_usd
+    description: >
+      Q1 — Average revenue per customer by segment, in USD. Revenue is
+      defined as monthly fee revenue (lifetime fees / tenure_months) plus
+      monthly interest accrued on active loans (status in 'current' or 
+      'delinquent'). All amounts converted to USD via fx_rates seed.
+      See decisions.md §1 and Day 9 corrections (interest_rate scale,
+      temporal consistency).
+    tests:
+      - dbt_utils.expression_is_true:
+          expression: "fee_revenue_share between 0 and 1 or fee_revenue_share is null"
+    columns:
+      - name: customer_segment
+        description: "Customer segment: retail / premium / private_banking / sme"
+        tests:
+          - unique
+          - not_null
+          - accepted_values:
+              values: ['retail', 'premium', 'private_banking', 'sme']
+
+      - name: customer_count
+        description: "Distinct customers in the segment"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+
+      - name: total_revenue_usd
+        description: "Sum of monthly fee + monthly interest revenue across the segment, USD"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: avg_revenue_per_customer_usd
+        description: "Average monthly revenue per customer in the segment, USD. Primary metric for Q1."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: total_fee_revenue_usd
+        description: "Sum of monthly fee revenue across segment, USD"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: total_interest_revenue_usd
+        description: "Sum of monthly interest revenue across segment, USD"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: avg_fee_revenue_per_customer_usd
+        description: "Average monthly fee revenue per customer in segment, USD"
+        tests:
+          - not_null
+
+      - name: avg_interest_revenue_per_customer_usd
+        description: "Average monthly interest revenue per customer in segment, USD"
+        tests:
+          - not_null
+
+      - name: fee_revenue_share
+        description: "Share of revenue from fees vs interest. NULL when total revenue is 0."
