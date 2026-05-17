@@ -1536,3 +1536,40 @@ that do not implement joint distributions.
 reported honestly in the Power BI dashboard with explicit narrative,
 which demonstrates analytical rigor (the metrics are produced, validated,
 and contextualized, rather than presented uncritically).
+
+
+### Finding: international transfers DO show structured patterns
+
+Contrary to the other Day 9 findings (revenue, DPD, utilization-delinquency,
+risk_score, channel preference — all uniformly distributed), the 
+international transfer mart reveals genuine structure in the data:
+
+**Bimodal distribution of transfer corridors:**
+  - Large corridors (~900 tx each): domestic transfers in local currency
+    or in USD where account currency matches.
+    Examples: AR-ARS (956 tx, 0% intl), CO-USD (940 tx, 1.3% intl).
+  - Small corridors (~30 tx each): rare exotic transfers, 100% intl.
+    Examples: PE-EUR, MX-UYU, CL-MXN.
+
+**International share by country (rolled up):**
+  - PE: 9.2%, MX: 9.0%, AR: 8.3%, CO: 8.2%, CL: 7.9%, BR: 7.8%, UY: 7.8%
+  - Relatively consistent across LATAM countries (7.8-9.2% spread).
+
+**Value asymmetry by country:**
+  - UY shows the highest international transfer VALUE per country
+    ($131,717 USD with only 9 transactions; ~$14,600 average ticket).
+  - Other LATAM countries: $30k-$70k total, $4-5k average ticket.
+
+**Interpretation:**
+  - The data generator implemented some geographic intent for transfers
+    (most are domestic in local currency).
+  - Uruguay's high-value/low-count international corridor is consistent
+    with its real-world role as a regional financial hub.
+  - The strict definition of international (decisions.md Day 9 §8 -
+    requires tx_currency to differ from BOTH account_currency AND
+    customer_country_currency) is critical: a more permissive definition
+    would have classified all USD transactions from non-USD countries as
+    international, hiding the real signal.
+
+This is the first Day 9 mart where the synthetic data shows realistic
+structure. It is reportable as a positive finding in the dashboard.
