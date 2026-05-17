@@ -1573,3 +1573,94 @@ international transfer mart reveals genuine structure in the data:
 
 This is the first Day 9 mart where the synthetic data shows realistic
 structure. It is reportable as a positive finding in the dashboard.
+
+## Refactor: int_customer_monthly_revenue 
+
+Day 10's afternoon block extracted the customer-grain revenue computation
+into an intermediate model (`int_customer_monthly_revenue`) consumed by
+both `mart_customer_360` and `mart_revenue_by_segment_usd`. Before the
+refactor, the same logic lived (duplicated) in both marts with two cosmetic
+differences:
+
+1. `mart_revenue_by_segment_usd` did not round per-customer values; rounding
+   happened only at the segment-level rollup.
+2. `mart_customer_360` rounded per-customer (it is a display mart) and used
+   a longer JOIN path for fee attribution (`fct_transactions → dim_account
+   → customer_id`) where the other mart used `fct_transactions.customer_id`
+   directly.
+
+Both differences were verified to produce **identical customer-level
+revenue values** in the current dataset (see `scripts/diagnose_fee_attribution.sql`
+and `scripts/diagnose_revenue_mismatch.sql`). The refactor preserves
+exact semantics: 0 / 5000 customers diverge on fee, interest, or total
+revenue between the pre-refactor SQL and the intermediate.
+
+### Precision policy adopted
+
+When an intermediate model serves multiple consumers with different
+aggregation patterns, precision must be set per-column, not globally:
+
+- **Native-currency columns** are rounded to 2 decimals at customer grain.
+  They are consumed by `mart_customer_360` (display, no further aggregation
+  inside the mart).
+- **USD columns** are NOT rounded at customer grain. They are consumed by
+  `mart_revenue_by_segment_usd` via `AVG(...)` over ~1,200 customers per
+  segment. Rounding before AVG would introduce small per-segment deltas
+  (cents propagating to dollars across hundreds of customers).
+
+**Lesson:** rounding at the wrong grain is a silent semantic change — no
+test fails, but aggregate snapshots drift. Bug only surfaces at numeric
+reconciliation time.
+
+### What got centralized
+
+| Logic | Pre-refactor location | Post-refactor location |
+|-------|----------------------|------------------------|
+| Fee revenue per customer (native + USD) | Duplicated in both marts | `int_customer_monthly_revenue` |
+| Interest revenue per customer (native + USD) | Duplicated in both marts | `int_customer_monthly_revenue` |
+| `fees / tenure_months` normalization | Duplicated, with NULLIF + COALESCE | `int_customer_monthly_revenue` |
+| Zero-tenure handling (COALESCE to 0) | Duplicated | `int_customer_monthly_revenue` |
+| Active-loan status filter (current, delinquent) | Duplicated | `int_customer_monthly_revenue` |
+
+`mart_customer_360` and `mart_revenue_by_segment_usd` now only do their
+own aggregation logic on top of the intermediate.
+
+---
+
+## Lesson: snapshot staleness vs SQL equivalence (Day 10)
+
+When validating the refactor, the morning snapshot in
+`scripts/validation_output.txt` (sme 2890.38, premium 2676.87, retail 2635.99,
+private_banking 2482.45) did not match the post-refactor output (sme 2897.17,
+premium 2666.19, retail 2583.02, private_banking 2534.46).
+
+The instinct was to assume the refactor changed semantics. It did not.
+Two diagnostic queries ruled out semantic divergence:
+
+1. `diagnose_fee_attribution.sql`: 0 of 3613 completed fees have
+   `t.customer_id != a.customer_id` (ruling out fee attribution drift).
+2. `diagnose_revenue_mismatch.sql`: re-implemented the pre-refactor mart
+   logic inline and compared per-customer against the intermediate;
+   0 of 5000 customers diverged on fee, interest, or total.
+
+The snapshot in `validation_output.txt` had become stale between the
+morning run (when the snapshot was captured) and the afternoon refactor
+validation. Some upstream dependency — a Silver re-run, a Bronze re-load,
+or a seed change — produced new underlying data without re-generating
+the snapshot.
+
+**Procedural improvements adopted:**
+
+- **The acid test for refactor equivalence is SQL-level comparison, not
+  snapshot comparison.** Re-implementing the pre-refactor logic inline
+  and comparing row-by-row against the new intermediate is dispositive
+  in a way snapshot comparisons are not.
+- **Validation snapshots should be regenerated whenever upstream
+  dependencies change**, or treated as approximate references rather than
+  exact contracts. The `business_questions.md` sample-result tables for
+  Q1/Q5/Q9 need a refresh now that the underlying data has shifted.
+- **The validation runbook should include a snapshot-generation step**
+  immediately before any refactor work begins, so the snapshot reflects
+  the pre-refactor state of the actual repo, not a state from earlier
+  in the day.
+

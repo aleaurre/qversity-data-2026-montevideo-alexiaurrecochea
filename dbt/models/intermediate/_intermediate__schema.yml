@@ -122,3 +122,84 @@ models:
           - not_null
           - dbt_utils.expression_is_true:
               expression: ">= 0"
+
+  - name: int_customer_monthly_revenue
+    description: |
+      Customer-grain monthly revenue base. Centralizes the revenue definition
+      (monthly fees + monthly interest accrued) so both mart_customer_360 and
+      mart_revenue_by_segment_usd consume it instead of duplicating the SQL.
+      Exposes both native-currency and USD versions of each component. See
+      decisions.md §1 + Day 9 corrections (interest_rate scale, temporal
+      consistency) and Day 10 refactor note.
+    columns:
+      - name: customer_id
+        description: "PK from dim_customer."
+        tests:
+          - unique
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+
+      - name: total_fees_paid_lifetime_native
+        description: |
+          Lifetime cumulative completed fees in native currency. Kept for
+          auditability and reconciliation with the source dataset; downstream
+          analytics use the monthly column instead.
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: total_fees_paid_lifetime_usd
+        description: "Same as above, converted to USD via fx_rates."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: monthly_fee_revenue_native
+        description: |
+          Lifetime fees normalized to monthly via tenure_months. Zero-tenure
+          customers (~0.9 %) get 0 via COALESCE. Native currency.
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: monthly_fee_revenue_usd
+        description: "Same as above, in USD."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: monthly_interest_revenue_native
+        description: |
+          Monthly accrued interest on active loans (status in current/
+          delinquent). Default and paid_off loans accrue zero. Native currency.
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: monthly_interest_revenue_usd
+        description: "Same as above, in USD."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: total_monthly_revenue_native
+        description: "monthly_fee_revenue_native + monthly_interest_revenue_native."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: total_monthly_revenue_usd
+        description: "monthly_fee_revenue_usd + monthly_interest_revenue_usd."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
