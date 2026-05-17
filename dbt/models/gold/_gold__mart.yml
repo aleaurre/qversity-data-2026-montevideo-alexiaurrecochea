@@ -225,7 +225,7 @@ models:
       - name: utilization_bucket
         tests:
           - accepted_values:
-              values: ['healthy', 'moderate', 'high', 'unknown']
+              values: ['healthy', 'moderate', 'high', 'maxed', 'over_limit', 'unknown']
 
       - name: bankruptcy_flag
         tests:
@@ -581,3 +581,98 @@ models:
           - not_null
           - dbt_utils.expression_is_true:
               expression: ">= 0"
+  
+  - name: mart_delinquency_by_segment
+    description: >
+      Q5 — Loan delinquency rate by customer segment. Rate denominator is
+      customers_with_loans (excludes customers without credit exposure).
+    columns:
+      - name: customer_segment
+        tests:
+          - unique
+          - not_null
+          - accepted_values:
+              values: ['retail', 'premium', 'private_banking', 'sme']
+      - name: customer_count
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: delinquency_rate
+        description: "Share of customers (with loans) with at least one delinquent loan."
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 1 or delinquency_rate is null"
+      - name: default_rate
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 1 or default_rate is null"
+
+  - name: mart_credit_score_by_country
+    description: >
+      Q6 — Credit score distribution by country, using FICO bucketing.
+      bucket_share_within_country sums to 1.0 per country.
+    columns:
+      - name: country
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['AR', 'BR', 'CL', 'CO', 'MX', 'PE', 'UY']
+      - name: credit_score_bucket
+        tests:
+          - not_null
+      - name: customer_count
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: bucket_share_within_country
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 1"
+
+  - name: mart_utilization_vs_delinquency
+    description: >
+      Q7 — Relationship between credit utilization and delinquency rate.
+      One row per utilization_bucket. Used to visualize the correlation
+      between utilization and credit performance.
+    columns:
+      - name: utilization_bucket
+        description: "Utilization band per decisions.md Day 9 §4."
+        tests:
+          - accepted_values:
+              values: ['healthy', 'moderate', 'high', 'maxed', 'over_limit', 'unknown']
+      - name: customer_count
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: delinquency_rate
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 1 or delinquency_rate is null"
+
+  - name: mart_risk_buckets
+    description: >
+      Q9 — Internal risk score bucketing with delinquency cross-validation.
+      Includes share of total population and observed delinquency per bucket.
+    columns:
+      - name: risk_bucket
+        tests:
+          - unique
+          - not_null
+      - name: customer_count
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: bucket_share
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 1"
+      - name: delinquency_rate
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 1 or delinquency_rate is null"

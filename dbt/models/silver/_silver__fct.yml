@@ -159,7 +159,7 @@ models:
           de gold para evitar errores de escala. Documentado en decisions.md día 9.
         tests:
           - dbt_utils.expression_is_true:
-              expression: "interest_rate_decimal = interest_rate / 100.0"
+              expression: "= interest_rate / 100.0"
               where: "interest_rate is not null"
 
       - name: days_past_due
