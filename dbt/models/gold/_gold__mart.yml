@@ -752,3 +752,56 @@ models:
           - not_null
           - dbt_utils.expression_is_true:
               expression: "between 0 and 1"
+
+  - name: mart_international_transfers
+    description: >
+      Q19 — International transfer patterns. Grain: (origin_country, 
+      tx_currency). Includes all transfers with is_international flag 
+      aggregated; allows Power BI to filter or compute share. See 
+      decisions.md Day 9 §8 for the international classifier definition.
+    columns:
+      - name: origin_country
+        description: "ISO country code of the customer originating the transfer."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['AR', 'BR', 'CL', 'CO', 'MX', 'PE', 'UY']
+      
+      - name: tx_currency
+        description: "Currency of the transfer."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('fx_rates')
+              field: currency
+      
+      - name: tx_count
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      
+      - name: international_tx_count
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      
+      - name: domestic_tx_count
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      
+      - name: international_share
+        description: "Share of intl transfers within the (country, currency) corridor. Between 0 and 1."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 1"
+      
+      - name: total_value
+        description: "Sum of completed transfer amounts in native tx_currency."
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: ">= 0 or total_value is null"
