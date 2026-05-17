@@ -60,7 +60,7 @@
 
 ## Q1 — Average revenue per customer by segment
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_revenue_by_segment_usd` &nbsp;·&nbsp; **Dashboard page:** Executive Overview
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_revenue_by_segment_usd` &nbsp;·&nbsp; **Dashboard page:** Executive Overview
 
 **Business definition** (see `decisions.md` §1 + Day 9 corrections):
 Revenue = monthly fee revenue (lifetime completed fees ÷ tenure_months)
@@ -86,10 +86,10 @@ ORDER BY avg_revenue_per_customer_usd DESC;
 
 | customer_segment | customer_count | avg_revenue_usd | avg_fee_usd | avg_interest_usd | fee_share |
 |---|---|---|---|---|---|
-| sme             | 1266 | 2890.38 | 1396.00 | 1494.38 | 0.483 |
-| premium         | 1230 | 2676.87 | 1200.68 | 1476.19 | 0.449 |
-| retail          | 1280 | 2635.99 | 1250.08 | 1385.91 | 0.474 |
-| private_banking | 1224 | 2482.45 | 1031.23 | 1451.22 | 0.415 |
+| sme             | 1266 | 2897.17 | 1402.79 | 1494.38 | 0.484 |
+| premium         | 1230 | 2666.19 | 1190.00 | 1476.19 | 0.446 |
+| retail          | 1280 | 2583.02 | 1197.11 | 1385.91 | 0.463 |
+| private_banking | 1224 | 2534.46 | 1083.24 | 1451.22 | 0.427 |
 
 4 rows, one per segment, sorted descending by avg_revenue.
 
@@ -110,7 +110,7 @@ ORDER BY avg_revenue_per_customer_usd DESC;
 
 ## Q2 — Total account balances by country
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_account_mix` &nbsp;·&nbsp; **Dashboard page:** Executive Overview
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_account_mix` &nbsp;·&nbsp; **Dashboard page:** Executive Overview
 
 **Business definition:**
 Only **active** accounts (`status = 'active'`) are counted — closed and frozen
@@ -166,7 +166,7 @@ ORDER BY country, currency;
 
 ## Q3 — Revenue breakdown by transaction channel
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_tx_by_channel` &nbsp;·&nbsp; **Dashboard page:** Revenue & Transactions
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_tx_by_channel` &nbsp;·&nbsp; **Dashboard page:** Revenue & Transactions
 
 **Business definition:**
 "Revenue" here is the **transactional throughput** routed through each channel
@@ -250,7 +250,7 @@ ORDER BY channel, currency;
 
 ## Q4 — Interest income by loan type
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_loan_composition` &nbsp;·&nbsp; **Dashboard page:** Risk & Credit
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_loan_composition` &nbsp;·&nbsp; **Dashboard page:** Risk & Credit
 
 **Business definition:**
 Interest income = `outstanding_balance × interest_rate_decimal / 12`,
@@ -332,7 +332,7 @@ ORDER BY loan_type, currency;
 
 ## Q5 — Loan delinquency rate by customer segment
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_delinquency_by_segment` &nbsp;·&nbsp; **Dashboard page:** Risk & Credit
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_delinquency_by_segment` &nbsp;·&nbsp; **Dashboard page:** Risk & Credit
 
 **Business definition:**
 Delinquency rate = share of customers (with at least one loan) who have ≥ 1
@@ -379,7 +379,7 @@ ORDER BY delinquency_rate DESC NULLS LAST;
 
 ## Q6 — Credit score distribution by country
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_credit_score_by_country` &nbsp;·&nbsp; **Dashboard page:** Risk & Credit
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_credit_score_by_country` &nbsp;·&nbsp; **Dashboard page:** Risk & Credit
 
 **Business definition:**
 Credit-score buckets follow the FICO convention (`poor / fair / good /
@@ -459,7 +459,7 @@ ORDER BY country,
 
 ## Q7 — Credit utilization vs delinquency relationship
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_utilization_vs_delinquency` &nbsp;·&nbsp; **Dashboard page:** Risk & Credit
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_utilization_vs_delinquency` &nbsp;·&nbsp; **Dashboard page:** Risk & Credit
 
 **Business definition:**
 Customers bucketed by `utilization_pct` (`healthy / moderate / high / maxed /
@@ -508,7 +508,7 @@ ORDER BY
 
 ## Q8 — Days past due distribution by loan type
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_loan_dpd` &nbsp;·&nbsp; **Dashboard page:** Risk & Credit
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_loan_dpd` &nbsp;·&nbsp; **Dashboard page:** Risk & Credit
 
 **Business definition:**
 DPD buckets follow industry conventions for credit-risk reporting:
@@ -780,7 +780,7 @@ ORDER BY loan_type, currency, dpd_bucket;
 
 ## Q9 — Risk-score segmentation (low / medium / high / critical)
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_risk_buckets` &nbsp;·&nbsp; **Dashboard page:** Risk & Credit
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_risk_buckets` &nbsp;·&nbsp; **Dashboard page:** Risk & Credit
 
 **Business definition:**
 Internal `risk_score` (0–100 scale, from the source dataset) bucketed into
@@ -843,7 +843,7 @@ the bottom of this document for a Power-BI-ready framing.
 
 ## Q10 — Customer count by country and city
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_customer_360` &nbsp;·&nbsp; **Dashboard page:** Customer & Engagement
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_customer_360` &nbsp;·&nbsp; **Dashboard page:** Customer & Engagement
 
 ### Query
 
@@ -898,7 +898,7 @@ ORDER BY country, customer_count DESC;
 
 ## Q11 — Age distribution by customer segment
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_customer_360` &nbsp;·&nbsp; **Dashboard page:** Customer & Engagement
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_customer_360` &nbsp;·&nbsp; **Dashboard page:** Customer & Engagement
 
 **Business definition:**
 Age buckets: `under_18 / 18-25 / 26-35 / 36-50 / 51-65 / 65+ / unknown`.
@@ -956,7 +956,7 @@ ORDER BY customer_segment,
 
 ## Q12 — Customer acquisition trend over time (monthly)
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_acquisition_trend` &nbsp;·&nbsp; **Dashboard page:** Customer & Engagement
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_acquisition_trend` &nbsp;·&nbsp; **Dashboard page:** Customer & Engagement
 
 ### Query
 
@@ -1054,7 +1054,7 @@ ORDER BY month;
 
 ## Q13 — Customer status breakdown ⚠️
 
-**Status:** Partial (dataset divergence documented) &nbsp;·&nbsp; **Mart:** `gold.mart_customer_360` &nbsp;·&nbsp; **Dashboard page:** Executive Overview
+**Status:** ⚠️ Partial (dataset divergence documented) &nbsp;·&nbsp; **Mart:** `gold.mart_customer_360` &nbsp;·&nbsp; **Dashboard page:** Executive Overview
 
 **Divergence from spec:**
 The project brief enumerates customer status as
@@ -1094,7 +1094,7 @@ ORDER BY customer_count DESC;
 
 ## Q14 — KYC status distribution
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_customer_360` &nbsp;·&nbsp; **Dashboard page:** Customer & Engagement
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_customer_360` &nbsp;·&nbsp; **Dashboard page:** Customer & Engagement
 
 ### Query
 
@@ -1125,7 +1125,7 @@ ORDER BY customer_count DESC;
 
 ## Q15 — Most common transaction categories by volume and value
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_tx_by_category` &nbsp;·&nbsp; **Dashboard page:** Revenue & Transactions
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_tx_by_category` &nbsp;·&nbsp; **Dashboard page:** Revenue & Transactions
 
 ### Query
 
@@ -1200,7 +1200,7 @@ ORDER BY completed_tx_count DESC;
 
 ## Q16 — Transaction volume by day of week
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_tx_by_dow` &nbsp;·&nbsp; **Dashboard page:** Revenue & Transactions
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_tx_by_dow` &nbsp;·&nbsp; **Dashboard page:** Revenue & Transactions
 
 ### Query
 
@@ -1232,7 +1232,7 @@ ORDER BY day_of_week;
 
 ## Q17 — Average transaction size by channel
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_tx_by_channel` &nbsp;·&nbsp; **Dashboard page:** Revenue & Transactions
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_tx_by_channel` &nbsp;·&nbsp; **Dashboard page:** Revenue & Transactions
 
 ### Query
 
@@ -1303,7 +1303,7 @@ ORDER BY channel, currency;
 
 ## Q18 — Failed transaction rate by channel
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_tx_by_channel` &nbsp;·&nbsp; **Dashboard page:** Revenue & Transactions
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_tx_by_channel` &nbsp;·&nbsp; **Dashboard page:** Revenue & Transactions
 
 **Business definition:**
 `failed_rate = failed_tx_count / tx_count` (all-status denominator). The
@@ -1339,7 +1339,7 @@ ORDER BY failed_rate DESC;
 
 ## Q19 — International transfer patterns
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_international_transfers` &nbsp;·&nbsp; **Dashboard page:** Revenue & Transactions
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_international_transfers` &nbsp;·&nbsp; **Dashboard page:** Revenue & Transactions
 
 **Business definition** (`decisions.md` Day 9 §8):
 `is_international = (transaction_type = 'transfer'
@@ -1399,7 +1399,7 @@ LIMIT 20;
 
 ## Q20 — Mobile app adoption rate by segment
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_digital_adoption_by_segment` &nbsp;·&nbsp; **Dashboard page:** Customer & Engagement
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_digital_adoption_by_segment` &nbsp;·&nbsp; **Dashboard page:** Customer & Engagement
 
 ### Query
 
@@ -1429,7 +1429,7 @@ ORDER BY mobile_adoption_rate DESC NULLS LAST;
 
 ## Q21 — Digital vs branch preference by age group
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_channel_preference_by_age` &nbsp;·&nbsp; **Dashboard page:** Customer & Engagement
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_channel_preference_by_age` &nbsp;·&nbsp; **Dashboard page:** Customer & Engagement
 
 **Business definition:**
 The mart exposes all 5 channels separately at the (age_bucket, preferred_channel)
@@ -1484,7 +1484,7 @@ ORDER BY
 
 ## Q22 — Most popular account types
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_account_mix` &nbsp;·&nbsp; **Dashboard page:** Executive Overview
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_account_mix` &nbsp;·&nbsp; **Dashboard page:** Executive Overview
 
 ### Query
 
@@ -1514,7 +1514,7 @@ ORDER BY total_accounts DESC;
 
 ## Q23 — Loan portfolio composition
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_loan_composition` &nbsp;·&nbsp; **Dashboard page:** Risk & Credit
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_loan_composition` &nbsp;·&nbsp; **Dashboard page:** Risk & Credit
 
 ### Query
 
@@ -1701,7 +1701,7 @@ ORDER BY loan_type, currency, status;
 
 ## Q24 — Average number of products per customer by segment
 
-**Status:** Covered &nbsp;·&nbsp; **Mart:** `gold.mart_customer_360` &nbsp;·&nbsp; **Dashboard page:** Executive Overview
+**Status:** ✅ Covered &nbsp;·&nbsp; **Mart:** `gold.mart_customer_360` &nbsp;·&nbsp; **Dashboard page:** Executive Overview
 
 **Business definition:**
 `total_products = accounts_count + loans_count`, pre-aggregated in
@@ -1822,9 +1822,9 @@ problems:
 
 | Status | Count | Questions |
 |---|---|---|
-| Covered     | 23 | Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8, Q9, Q10, Q11, Q12, Q14, Q15, Q16, Q17, Q18, Q19, Q20, Q21, Q22, Q23, Q24 |
-| Partial    | 1  | Q13 (customer-level `status` matches spec; account-level `status` diverges — documented) |
-| Out of scope | 0  | — |
+| ✅ Covered     | 23 | Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8, Q9, Q10, Q11, Q12, Q14, Q15, Q16, Q17, Q18, Q19, Q20, Q21, Q22, Q23, Q24 |
+| ⚠️ Partial    | 1  | Q13 (customer-level `status` matches spec; account-level `status` diverges — documented) |
+| ❌ Out of scope | 0  | — |
 
 **Total: 24 / 24** &nbsp;·&nbsp; **Target: ≥ 21 / 24** &nbsp;·&nbsp; **Achieved: ✅**
 
