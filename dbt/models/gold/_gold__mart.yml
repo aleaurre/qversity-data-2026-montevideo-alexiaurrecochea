@@ -676,3 +676,79 @@ models:
         tests:
           - dbt_utils.expression_is_true:
               expression: "between 0 and 1 or delinquency_rate is null"
+  
+  - name: mart_digital_adoption_by_segment
+    description: >
+      Q20 — Mobile app adoption rate by customer segment. Includes
+      complementary digital engagement metrics: web adoption, any digital,
+      push notifications, paperless, and average monthly logins for depth.
+    columns:
+      - name: customer_segment
+        tests:
+          - unique
+          - not_null
+          - accepted_values:
+              values: ['retail', 'premium', 'private_banking', 'sme']
+      
+      - name: customer_count
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      
+      - name: mobile_adoption_rate
+        description: "Share of customers in the segment with mobile_app_registered=TRUE"
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 1 or mobile_adoption_rate is null"
+      
+      - name: web_adoption_rate
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 1 or web_adoption_rate is null"
+      
+      - name: any_digital_adoption_rate
+        description: "Share with mobile OR web registered"
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 1 or any_digital_adoption_rate is null"
+      
+      - name: push_notifications_rate
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 1 or push_notifications_rate is null"
+      
+      - name: paperless_rate
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 1 or paperless_rate is null"
+
+  - name: mart_channel_preference_by_age
+    description: >
+      Q21 — Channel preference by age bucket. Grain: (age_bucket, 
+      preferred_channel). Exposes all 5 channels separately; Power BI 
+      groups digital (mobile+web) vs non-digital (atm+branch+phone)
+      at visualization time.
+    columns:
+      - name: age_bucket
+        tests:
+          - not_null
+      
+      - name: preferred_channel
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['mobile', 'web', 'atm', 'branch', 'phone']
+      
+      - name: customer_count
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      
+      - name: bucket_share_within_age
+        description: "Share of channel within age bucket. Sums to 1.0 per age."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 1"
