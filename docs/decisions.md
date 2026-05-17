@@ -1495,3 +1495,44 @@ exhibits independence patterns that would not occur in production banking.
 This is a Day 9 insight worth highlighting in the project README as it
 demonstrates the value of validation: a less careful analyst would have
 delivered a "risk_score" dashboard without noticing it predicts nothing.
+
+
+### Finding: digital engagement metrics show no demographic gradient
+
+mart_digital_adoption_by_segment and mart_channel_preference_by_age 
+reveal that digital engagement metrics in the dataset are independent
+of customer demographics:
+
+**Q20 - Mobile adoption by segment:**
+  - retail:          47.6%
+  - premium:         49.2%
+  - private_banking: 49.8%
+  - sme:             49.9%
+  Spread: 2.3 percentage points.
+
+**Q21 - Channel preference by age:**
+  - For every age bucket (18-25, 26-35, 36-50, 51-65, 65+), the five
+    channels (mobile/web/atm/branch/phone) each capture ~20% of customers.
+  - Maximum spread within any age bucket is ~7 percentage points.
+
+In real-world banking, both metrics show strong gradients:
+  - Premium/private_banking customers (typically older, higher net worth)
+    show LOWER mobile adoption than retail.
+  - 18-25 year olds typically show 50%+ mobile preference; 65+ customers
+    show 50%+ branch/phone preference. The dataset shows ~20%/~20% for
+    all age groups across all channels.
+
+The synthetic data assigns digital engagement attributes uniformly,
+independent of segment or age. Combined with the other Day 9 findings
+(flat revenue by segment, flat utilization-delinquency, risk_score
+non-predictive of delinquency), this is the fifth consistent observation
+that the generator samples demographic and behavioral dimensions
+INDEPENDENTLY rather than modeling their natural correlations.
+
+This pattern is a known limitation of simple synthetic data generators
+that do not implement joint distributions.
+
+**Decision:** the marts are computed correctly. The findings are 
+reported honestly in the Power BI dashboard with explicit narrative,
+which demonstrates analytical rigor (the metrics are produced, validated,
+and contextualized, rather than presented uncritically).
