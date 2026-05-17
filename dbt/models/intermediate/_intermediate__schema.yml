@@ -77,3 +77,48 @@ models:
           - not_null
           - dbt_utils.expression_is_true:
               expression: ">= 0"
+
+  - name: int_customer_risk_profile
+    description: |
+      Customer-grain risk and credit profile base. Centralizes bucketing
+      (risk, credit_score, utilization) and customer-level delinquency
+      flags (any-rule rollup from int_loan_portfolio_metrics). Consumed by
+      mart_delinquency_by_segment, mart_credit_score_by_country,
+      mart_utilization_vs_delinquency, mart_risk_buckets.
+    columns:
+      - name: customer_id
+        description: "PK from dim_customer."
+        tests:
+          - unique
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+      
+      - name: country
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['AR', 'BR', 'CL', 'CO', 'MX', 'PE', 'UY']
+      
+      - name: customer_segment
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['retail', 'premium', 'private_banking', 'sme']
+      
+      - name: is_delinquent_customer
+        description: "Any-rule: TRUE if customer has at least one delinquent loan."
+        tests:
+          - not_null
+      
+      - name: is_default_customer
+        description: "Any-rule: TRUE if customer has at least one default loan."
+        tests:
+          - not_null
+      
+      - name: loans_count
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
