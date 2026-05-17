@@ -13,7 +13,7 @@ seeds:
           - unique
           - not_null
           - accepted_values:
-              values: ['USD', 'ARS', 'UYU', 'COP', 'MXN', 'CLP', 'PEN', 'BRL']
+              values: ['USD', 'ARS', 'UYU', 'COP', 'MXN', 'CLP', 'PEN', 'BRL','EUR']
       - name: rate_to_usd
         description: "Multiplier to convert from this currency to USD"
         tests:
