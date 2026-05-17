@@ -1457,3 +1457,41 @@ the unrealistic distribution is a property of the synthetic data source.
 Pattern consistent with the revenue-by-segment flatness finding (Mart 1):
 the generator does not correlate financial dimensions (DPD, loan amount,
 revenue) with customer segments or loan types in realistic ways.
+
+### Finding: risk_score does not correlate with realized delinquency
+
+The mart_risk_buckets output reveals a critical observation:
+
+| risk_bucket | customer_count | delinquency_rate |
+|-------------|----------------|------------------|
+| low         | 1,495          | 65.3%            |
+| medium      | 1,539          | 63.2%            |
+| high        | 1,218          | 62.8%            |
+| critical    |   748          | 60.4%            |
+
+The relationship is non-monotonic and counterintuitive: customers
+classified as "low risk" show a HIGHER delinquency rate than those
+classified as "critical". In a calibrated risk model, the gradient
+should be the opposite and span tens of percentage points (e.g.,
+low: 2-5%, critical: 70%+).
+
+**Interpretation:** the synthetic dataset assigns `risk_score` 
+independently from the underlying customer financial behavior. This is
+a stronger finding than the previously documented flatness in revenue
+and utilization-delinquency: it directly refutes the predictive validity
+of the `risk_score` field.
+
+Combined with the other Day 9 findings (flat revenue by segment, flat
+utilization-delinquency correlation, uniform DPD distribution, near-flat
+risk segmentation), the consistent pattern is: the source data generator
+samples financial-risk-related dimensions independently rather than
+modeling their natural correlations. This is a known limitation of
+synthetic generators that do not implement joint distributions.
+
+**Decision:** report findings honestly in the Power BI Risk & Credit page
+with explicit narrative. The metrics are computed correctly; the data
+exhibits independence patterns that would not occur in production banking.
+
+This is a Day 9 insight worth highlighting in the project README as it
+demonstrates the value of validation: a less careful analyst would have
+delivered a "risk_score" dashboard without noticing it predicts nothing.
