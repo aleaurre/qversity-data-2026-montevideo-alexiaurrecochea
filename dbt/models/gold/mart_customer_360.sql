@@ -18,13 +18,30 @@
       - silver.dim_credit_info         : credit_score, utilization, etc.
       - silver.dim_digital_engagement  : mobile/web registration, channel
       - silver.agg_customer_activity   : pre-aggregated product counts (Q24)
-      - silver.int_customer_monthly_revenue : pre-computed revenue metrics
-                                              (Day 10 refactor — see decisions.md)
+      - silver.fct_transactions        : fee revenue (completed only)
+      - silver.fct_loans               : interest income (active loans)
 
-    Revenue: previously defined inline in this mart, now centralized in
-    int_customer_monthly_revenue. Both this mart and mart_revenue_by_segment_usd
-    consume the intermediate; see that model's header for the full definition
-    and the Day 9 corrections (interest_rate scale, temporal consistency).
+    Revenue definition (per decisions.md, Day 8 + Day 9 + Day 11 corrections):
+      - total_fees_paid_lifetime = SUM(amount) where transaction_type='fee'
+        AND status='completed'. Other statuses (failed/pending/reversed)
+        represent ~75% of fee rows in the synthetic dataset but are NOT
+        realized revenue.
+      - monthly_fee_revenue = total_fees_paid_lifetime / GREATEST(tenure_months, 3).
+        Day 9 fix: temporal consistency (lifetime fees -> monthly).
+        Day 11 fix: clamp denominator to >=3 months. Customers with very
+        short tenure (1-3 months) produced unrealistic monthly rates
+        (e.g., $206M/mo for a customer with tenure=1) because lifetime
+        fees were divided by near-zero. The clamp treats <3-month tenures
+        as if they had 3 months of accrual, stabilizing the metric.
+      - monthly_interest_income = SUM(outstanding_balance * interest_rate_decimal / 12)
+        over loans with status IN ('current', 'delinquent'). Default and
+        paid_off loans accrue no interest. interest_rate_decimal is on 0-1
+        scale (Day 9 fix). See decisions.md Day 9.
+        Note: residual outliers exist due to extreme outstanding_balance
+        values in source data (~452 loans > $100M). Source data issue,
+        instrumented as warn-level test on silver.fct_loans. See decisions.md
+        Day 11.
+      - total_revenue_monthly = monthly_fee_revenue + monthly_interest_income.
 
     Bucket macros applied:
       - age_bucket, tenure_bucket: already materialized in dim_customer (Silver).
@@ -37,8 +54,9 @@
       - Customers without credit_info / digital_engagement / loans / transactions
         get NULL metrics, NOT excluded. LEFT JOIN preserves the full population
         for Q10/Q13/Q14 even when credit/digital data is missing.
-      - Zero-tenure customers (~0.9 %, 45 of 5,000) receive monthly_fee_revenue=0
-        from int_customer_monthly_revenue (COALESCE there); see decisions.md Day 9.
+      - 38 customers (~0.8%) have tenure_months=0. Their monthly_fee_revenue
+        is computed as fees / 3 via the Day 11 clamp, attributing a stabilized
+        rate rather than dividing by zero.
 */
 
 with base_customer as (
@@ -97,17 +115,38 @@ activity as (
 
 ),
 
-revenue as (
+fees_by_customer as (
 
-    -- Centralized revenue computation. See int_customer_monthly_revenue
-    -- for the full definition and rationale.
+    -- Lifetime cumulative fee revenue: only completed fees count.
+    -- Will be normalized to monthly in final CTE using tenure_months.
+    -- See decisions.md Day 9 on temporal consistency.
+    select
+        a.customer_id,
+        round(sum(t.amount)::numeric, 2) as total_fees_paid_lifetime
+    from {{ ref('fct_transactions') }} as t
+    inner join {{ ref('dim_account') }} as a
+        on t.account_id = a.account_id
+    where t.transaction_type = 'fee'
+      and t.status = 'completed'
+    group by a.customer_id
+
+),
+
+interest_by_customer as (
+
+    -- Monthly interest income accrued on active loans.
+    -- Default and paid_off loans accrue no interest (status filter).
+    -- Day 9 fix: uses interest_rate_decimal (0-1 scale), not interest_rate
+    -- (percent scale). See decisions.md Day 9.
     select
         customer_id,
-        total_fees_paid_lifetime_native as total_fees_paid_lifetime,
-        monthly_fee_revenue_native       as monthly_fee_revenue,
-        monthly_interest_revenue_native  as monthly_interest_income,
-        total_monthly_revenue_native     as total_revenue_monthly
-    from {{ ref('int_customer_monthly_revenue') }}
+        round(sum(outstanding_balance * interest_rate_decimal / 12)::numeric, 2)
+            as monthly_interest_income
+    from {{ ref('fct_loans') }}
+    where status in ('current', 'delinquent')
+      and outstanding_balance is not null
+      and interest_rate_decimal is not null
+    group by customer_id
 
 ),
 
@@ -155,17 +194,35 @@ final as (
         coalesce(act.transactions_count, 0) as transactions_count,
         coalesce(act.total_products, 0)     as total_products,
 
-        -- ---------- Revenue (from int_customer_monthly_revenue) ----------
-        coalesce(rev.total_fees_paid_lifetime, 0) as total_fees_paid_lifetime,
-        coalesce(rev.monthly_fee_revenue, 0)      as monthly_fee_revenue,
-        coalesce(rev.monthly_interest_income, 0)  as monthly_interest_income,
-        coalesce(rev.total_revenue_monthly, 0)    as total_revenue_monthly
+        -- ---------- Revenue (per decisions.md Day 9 + Day 11) ----------
+        -- Lifetime cumulative fees, kept for auditability and reconciliation.
+        coalesce(f.total_fees_paid_lifetime, 0) as total_fees_paid_lifetime,
+
+        -- Monthly fee revenue = lifetime fees / GREATEST(tenure_months, 3).
+        -- Clamp at 3 months prevents division-by-near-zero blowups for
+        -- customers with tenure 1-2 months. See decisions.md Day 11.
+        round(
+            (coalesce(f.total_fees_paid_lifetime, 0) /
+             greatest(c.tenure_months, 3))::numeric,
+            2
+        ) as monthly_fee_revenue,
+
+        coalesce(i.monthly_interest_income, 0) as monthly_interest_income,
+
+        -- Total monthly revenue: temporally consistent (both components monthly).
+        -- Fee component uses same clamp as monthly_fee_revenue above.
+        round(
+            (coalesce(f.total_fees_paid_lifetime, 0) /
+             greatest(c.tenure_months, 3))::numeric,
+            2
+        ) + coalesce(i.monthly_interest_income, 0) as total_revenue_monthly
 
     from base_customer       as c
-    left join credit         as cr  on c.customer_id = cr.customer_id
-    left join digital        as d   on c.customer_id = d.customer_id
-    left join activity       as act on c.customer_id = act.customer_id
-    left join revenue        as rev on c.customer_id = rev.customer_id
+    left join credit                as cr  on c.customer_id = cr.customer_id
+    left join digital               as d   on c.customer_id = d.customer_id
+    left join activity              as act on c.customer_id = act.customer_id
+    left join fees_by_customer      as f   on c.customer_id = f.customer_id
+    left join interest_by_customer  as i   on c.customer_id = i.customer_id
 
 )
 
