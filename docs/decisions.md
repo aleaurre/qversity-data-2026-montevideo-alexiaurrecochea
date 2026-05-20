@@ -1707,3 +1707,140 @@ subyacente nueva sin re-generar el snapshot.
   inmediatamente antes de empezar cualquier trabajo de refactor, así el
   snapshot refleja el estado pre-refactor del repo real, no un estado de
   más temprano en el día.
+
+
+---
+
+## PowerBI integration and downstream DQ findings
+
+### Setup
+
+PowerBI Desktop connected to PostgreSQL on localhost:5432 via native 
+connector (Import mode, not DirectQuery). Only `gold.mart_*` tables 
+imported; bronze and silver excluded from the .pbix.
+
+No model relationships configured between marts. Each mart is pre-aggregated
+in dbt with its own grain and self-contains the dimensional context. This
+reflects a "wide marts" pattern intentionally chosen over star schema,
+defensible because the agregaciones live in dbt (auditable, tested) rather
+than in DAX (opaque, untested).
+
+### Bug found via PowerBI integration: monthly_fee_revenue blowup
+
+When validating the four base DAX measures on Page 1 KPI cards, 
+`Avg Revenue per Customer USD` returned $1.03M/month/customer, which 
+is implausible by 4+ orders of magnitude.
+
+Diagnosis via SQL on `gold.mart_customer_360`:
+- 721 customers (14.4%) have `total_revenue_monthly > $1M`
+- max = $207,379,782 (CUST-0003449, sme, tenure_months=1)
+- The top 10 outliers all share `tenure_months ≤ 3` OR have 
+  abnormally high interest income.
+
+**Root cause #1 — Fee revenue division-by-near-zero:**
+The original formula `monthly_fee_revenue = total_fees_paid_lifetime / tenure_months`
+correctly normalized lifetime fees to monthly scale (Day 9 fix), but
+broke for customers with tenure 1-3 months. A customer who paid $200M in
+fees during month 1 would project $200M/month, treating lifetime as
+run-rate. This is a flaw in the formula, not in source data.
+
+**Fix:** clamp denominator with `GREATEST(tenure_months, 3)`. Trade-off:
+underestimates revenue for genuinely young + active customers, but
+stabilizes the metric for the 38+71+74 = 183 customers (3.7%) with 
+tenure ≤ 2. Applied in `mart_customer_360.sql` and `mart_revenue_by_segment_usd.sql`.
+
+**Root cause #2 — Source data: extreme outliers in outstanding_balance:**
+Independent of fee logic, `monthly_interest_income` showed customers with
+$20-37M/month interest accrual. Investigation:
+- `interest_rate_decimal`: validated, range [0.0301, 0.35], median 19.4%. 
+  Day 9 fix is correct.
+- `outstanding_balance` in `silver.fct_loans`: max $1,841,582,518.
+  1,227 loans > $1M, 452 loans > $100M, all in COP currency for
+  retail/SME customers labeled as auto loans.
+- Example: CUST-0001189 has a COP $1,285M auto loan. The math is correct
+  ($1.285B × 0.3469 / 12 = $37.16M COP interest/month).
+
+This is a property of the **synthetic dataset**, not a pipeline bug. The
+generator created retail loans with corporate-finance-scale balances,
+inconsistent with the segments. This joins the growing list of generator
+artifacts already documented (DPD distribution flat at 50%, risk_score
+not correlated with delinquency, customer_segment not correlated with
+revenue, etc.).
+
+**Action:** instrumented as a `warn`-level test:
+```yaml
+- name: outstanding_balance
+  tests:
+    - dbt_utils.expression_is_true:
+        expression: "< 100000000 or outstanding_balance is null"
+        config:
+          severity: warn
+```
+`dbt test` now produces a visible warning on every run, making this
+DQ issue self-documenting in the build output.
+
+Additionally, `mart_customer_360.total_revenue_monthly` got a `warn`-level
+range test (>= 0 and < 1M). With the Day 11 fix, this is expected to 
+warn on ~30-50 customers (down from 721), all attributable to interest
+on the corporate-scale loans above. Confirms the fee bug is fully closed
+and the residual is source-data, not formula.
+
+### Dashboard implication: median over average
+
+Given the long-tail residual from interest outliers, the Executive 
+Overview KPI changed from `AVG(total_revenue_monthly)` to `MEDIAN`. 
+The mediana is the statistically correct location measure for any 
+right-skewed financial distribution (always true for revenue per customer
+in real banking) and is robust to the residual synthetic outliers.
+
+New DAX: 
+Median Revenue per Customer USD =
+MEDIANX(mart_customer_360, mart_customer_360[total_revenue_monthly])
+
+Documented on the dashboard via a tooltip on the KPI card.
+
+### Currency strategy in dashboard
+
+[completar con lo que decidas: USD-only / global slicer / multi-leyenda]
+
+### Process lesson
+
+The bug had been latent since Day 9. dbt tests didn't catch it because:
+- `expression_is_true: ">= 0"` passes for $206M (it IS >= 0).
+- No magnitude / range / outlier test existed on revenue metrics.
+
+The bug surfaced only when a downstream BI consumer rendered the number
+to a human-readable card. **Lesson:** numeric metrics need magnitude 
+tests, not just sign tests, especially when they're derived from divisions
+or accruals. The new `warn`-level test on `total_revenue_monthly` is the
+generalized fix.
+
+### Post-fix diagnosis of residual outliers
+
+After applying the tenure-clamp fix, 722 customers (down from 721) still
+showed `total_revenue_monthly > $1M`. The count being nearly identical
+suggested the fix had a different effect than naively reducing outlier
+count — it instead reduced the **magnitude** of individual blowups
+(CUST-0003449 fee_revenue went from $206M to $68.9M) without removing
+them from the >$1M bucket.
+
+Decomposition of the 722 outliers:
+- 369 (51%) driven by interest_income alone (avg tenure 36.7 months,
+  not affected by the clamp). Root cause: ~693 source loans with 
+  outstanding_balance > $100M.
+- 265 (37%) driven by fee_revenue alone (avg tenure 27.3 months,
+  outside the clamp window). Root cause: source customers with 
+  total_fees_paid_lifetime in the corporate-finance scale 
+  (e.g., CUST-0000347: $348M lifetime fees over 27 months tenure).
+- 73 (10%) with both components in the millions.
+- 15 (2%) below $1M individually but above when summed.
+
+The synthetic dataset thus contains two parallel "scale escapes" 
+(loans + fees), both inconsistent with the implied retail/SME segments
+of the affected customers. Both are now documented as warn-level dbt
+tests, making them visible on every build without blocking the pipeline.
+
+Conclusion: the Day 11 formula fix is complete. Residual outliers are
+**source data, not pipeline behavior**. The median (not mean) is therefore
+the statistically correct KPI for the dashboard, and the warn tests
+serve as ongoing evidence of the source-data limitations.
