@@ -56,8 +56,16 @@ Campos con valores aparentemente generados con escala equivocada (max ~$2 mil
 millones): `balance`, `principal`, `outstanding_balance`, `monthly_payment`,
 `total_limit`, `total_used`.
 - **No descartar** - pueden ser legítimos en `private_banking`.
-- Marcar con flag `is_outlier_<col>` por percentil 99.
-- En Gold, los KPIs de tendencia central usan **mediana**, no media.
+- ~~Marcar con flag `is_outlier_<col>` por percentil 99.~~
+  **Estado Día 10:** decisión Día 1 NO implementada (verificado via
+  `information_schema.columns` — 0 columnas `is_outlier*` en el warehouse).
+  Los outliers están presentes en Gold sin marcar; los marts usan SUM/AVG
+  estándar sin filtrar. Si Power BI necesita robustez frente a outliers,
+  se puede aplicar filtrado por percentil en el dashboard, o agregar
+  columnas `is_outlier_*` en una iteración futura.
+- En Gold, los KPIs de tendencia central usan **mediana**, no media,
+  cuando la sensibilidad a outliers importa (aplicado selectivamente
+  en los marts donde corresponde).
 
 ### 1.7 credit_score corrupto
 **524 records (10,3%) tienen credit_score fuera del rango válido [300-850]**,
@@ -223,15 +231,21 @@ deben pasar después de la dedup en cascada.
 
 | Campo                                      | % nulls | Decisión                                                        |
 |--------------------------------------------|---------|-----------------------------------------------------------------|
-| `relationship_manager`                     | 9,9%    | Imputar `'UNASSIGNED'` en dim_customer.                         |
+| `relationship_manager`                     | 9,9%    | **Día 6: revisited.** La decisión Día 1 (imputar `'UNASSIGNED'`) NO se implementó. `dim_customer.sql` pasa el valor through tal cual viene del JSON. Cualquier consumidor downstream que necesite tratar NULL como "no asignado" debe aplicar `COALESCE(relationship_manager, 'UNASSIGNED')` en su query. |
 | `address`                                  | 7,8%    | Conservar NULL. No bloquea análisis.                            |
-| `gender`                                   | 5,4%    | Imputar `'Unknown'`.                                            |
+| `gender`                                   | 5,4%    | **Día 6: revisited.** La decisión Día 1 (imputar `'Unknown'`) NO se implementó. `dim_customer.sql` pasa NULL through: `(data ->> 'gender')::text as gender`. Sin imputación. |
 | `accounts.credit_limit`                    | 74,6%   | **Legítimo:** solo `credit_card` lo tiene.                      |
 | `transactions.description`                 | 10,2%   | Aceptable. Conservar NULL.                                      |
 | `transactions.merchant`                    | 8,3%    | Aceptable. Conservar NULL.                                      |
 | `transactions.category`                    | 4,9%    | Conservar NULL.                                                 |
 | `loans.collateral_type`                    | 47,7%   | **Legítimo:** unsecured loans → mapear a `'unsecured'` en Gold. |
-| `digital_engagement.avg_monthly_logins`    | 7,4%    | Validar hipótesis (¿coincide con no-registrados?) → imputar 0 si sí. |
+| `digital_engagement.avg_monthly_logins`    | 7,4%    | **Día 6: revisited.** La decisión Día 1 (validar hipótesis + imputar 0) NO se implementó. `dim_digital_engagement` aplica `safe_cast_numeric(..., 'int')` y deja NULL passthrough cuando el source es NULL o no-parseable. La hipótesis "NULL coincide con `mobile_app_registered=FALSE AND web_banking_registered=FALSE`" nunca se validó formalmente. Cualquier consumidor downstream que necesite tratar NULL como 0 debe aplicar `COALESCE(avg_monthly_logins, 0)` en su query. |
+
+**Patrón observado:** las decisiones de imputación de Día 1 (UNASSIGNED, Unknown)
+no se implementaron — durante el modelado en dbt se eligió pass-through NULL
+en lugar de imputación. Esto es defensible: NULL preserva la información
+"dato no disponible" sin inventar valores; los consumidores downstream
+(Power BI, queries ad-hoc) pueden imputar en el punto de uso si lo necesitan.
 
 ---
 
@@ -260,6 +274,9 @@ deben pasar después de la dedup en cascada.
 > low: 0–25 | medium: 26–50 | high: 51–75 | critical: 76–100
 
 **Credit utilization (0-100):**
+> *(Definición Día 1 — **superseded por Día 9 §4**: la versión final tiene
+> 6 buckets incluyendo `over_limit` y `unknown`. Ver sección 4 "Business
+> definitions for Gold marts" más abajo.)*
 > low: <30 | medium: 30–70 | high: 70–90 | critical: >90
 
 **Credit score (300-850, validados):**
@@ -495,483 +512,392 @@ verificables automáticamente.
 - Sin nulls, sin variantes raras.
 
 
-## Deduplication Strategy
+## Estrategia de deduplicación
 
-The pipeline applies deduplication at two layers, each handling the kind of
-duplicate that's natural to its abstraction.
+El pipeline aplica deduplicación en dos capas, cada una manejando el tipo de
+duplicación que es natural a su nivel de abstracción.
 
-### Why deduplicate at all
+### Por qué deduplicar
 
-Bronze is append-only: every DAG run inserts the full dataset again with a
-fresh `load_id` and `load_timestamp`. This is intentional - bronze is meant
-to be a faithful audit log of what arrived from the source, not a deduped
-view. During development the DAG runs many times, so by the time we hit
-silver, the same `customer_id` (and every PK nested inside it) appears in
-multiple bronze rows.
+Bronze es append-only: cada corrida del DAG inserta el dataset completo de
+nuevo con un nuevo `load_id` y `load_timestamp`. Esto es intencional —
+Bronze debe ser un log fiel de auditoría de lo que llegó del source, no
+una vista deduplicada. Durante el desarrollo el DAG corre múltiples veces,
+así que para cuando los datos llegan a Silver, el mismo `customer_id` (y
+cada PK anidada adentro) aparece en múltiples filas de Bronze.
 
-Without dedup, the silver staging tables would carry those repeats forward,
-breaking PK-uniqueness tests in dbt and inflating every aggregate downstream.
+Sin deduplicación, las tablas de staging en Silver arrastrarían esos
+duplicados, rompiendo los tests de unicidad de PK en dbt e inflando todo
+agregado downstream.
 
-### Where dedup happens
+### Dónde sucede la deduplicación
 
-**PySpark (silver staging tables) - dedup by array PK.**
+**PySpark (tablas de staging en Silver) — dedup por PK del array.**
 
-Each of the three flatteners (`flatten_accounts.py`, `flatten_transactions.py`,
-`flatten_loans.py`) deduplicates by the natural primary key of the array it
-explodes:
+Cada uno de los tres flatteners (`flatten_accounts.py`, `flatten_transactions.py`,
+`flatten_loans.py`) deduplica por la primary key natural del array que
+explota:
 
-| Script                       | Output table                  | Dedup key        |
+| Script                       | Tabla de salida               | Clave de dedup   |
 |------------------------------|-------------------------------|------------------|
 | `flatten_accounts.py`        | `silver.stg_accounts`         | `account_id`     |
 | `flatten_transactions.py`    | `silver.stg_transactions`     | `transaction_id` |
 | `flatten_loans.py`           | `silver.stg_loans`            | `loan_id`        |
 
-The shared logic lives in `spark/utils.py::deduplicate_by_pk`, which applies
-a window function partitioned by the PK and ordered by `load_timestamp DESC`,
-keeping `row_number() == 1`. In plain English: **for each PK, keep the row
-that came from the most recent bronze load.**
+La lógica compartida vive en `spark/utils.py::deduplicate_by_pk`, que aplica
+una window function particionada por la PK y ordenada por `load_timestamp DESC`,
+conservando `row_number() == 1`. En palabras simples: **para cada PK, se
+conserva la fila que vino del load más reciente de Bronze.**
 
-This is the right semantics for a staging table: silver should reflect the
-latest known state of each entity, not its history. If we ever need the
-history (SCD2-style), that lives in a dedicated dimensional model in
-silver/gold, not in staging.
+Esta es la semántica correcta para una tabla de staging: Silver debe
+reflejar el último estado conocido de cada entidad, no su historial. Si
+alguna vez necesitamos el historial (estilo SCD2), eso vive en un modelo
+dimensional dedicado en silver/gold, no en staging.
 
-**dbt (silver dimensions) - dedup by customer_id.**
+**dbt (dimensiones en Silver) — dedup por customer_id.**
 
-Customer-level dedup is *not* done in PySpark. The reason is the project's
-tool roles: PySpark's job is array flattening, and the customer record itself
-has no nested arrays to flatten - its flat fields are already flat in the
-source JSON. So `dim_customers` is built directly in dbt, reading from
-`bronze.raw_fintech_data` via a staging model that parses the `jsonb` and
-applies the same "latest `load_timestamp` wins" rule using `qualify
-row_number() over (partition by customer_id order by load_timestamp desc) = 1`.
+La deduplicación a nivel customer NO se hace en PySpark. La razón son los
+roles de las herramientas del proyecto: el trabajo de PySpark es el array
+flattening, y el record de customer en sí mismo no tiene arrays anidados
+para aplanar — sus campos planos ya están planos en el JSON source. Por
+eso `dim_customer` se construye directamente en dbt, leyendo de
+`bronze.raw_fintech_data` vía un modelo de staging que parsea el `jsonb` y
+aplica la misma regla "gana el último `load_timestamp`" usando
+`qualify row_number() over (partition by customer_id order by load_timestamp desc) = 1`.
 
-This split keeps each tool doing what the project asks it to do, and avoids
-materializing an intermediate `silver.stg_customers` table that would
-duplicate work between the layers.
+Esta separación mantiene a cada herramienta haciendo lo que el proyecto
+pide, y evita materializar una tabla intermedia `silver.stg_customers` que
+duplicaría trabajo entre las capas.
 
-### Edge cases
+### Casos borde
 
-- **Same `load_timestamp` for two versions of the same PK** - happens if the
-  DAG fires twice in the same second. Spark picks one arbitrarily; since
-  the rows are byte-identical when this occurs (same source file, same
-  parsing), it doesn't matter which one wins. Documented but not guarded
-  against.
-- **Null PKs** - `row_number()` treats nulls as their own group and would
-  keep one. We don't filter nulls in PySpark; if a null PK appears, it's an
-  upstream data-quality bug that dbt's `not_null` test will catch and fail
-  loudly on, which is the behavior we want.
-- **Customers without loans** - `flatten_loans.py` uses `explode` (not
-  `explode_outer`), so customers with empty `loans[]` produce zero rows.
-  This is correct: `silver.stg_loans` is a fact table of loans, not a
-  customer × loan matrix. Metrics like "% of customers with a loan" are
-  built in gold via a `LEFT JOIN` from `dim_customers`.
+- **Mismo `load_timestamp` para dos versiones de la misma PK** — sucede si
+  el DAG dispara dos veces en el mismo segundo. Spark elige una arbitrariamente;
+  como las filas son byte-idénticas cuando esto ocurre (mismo source file,
+  mismo parsing), no importa cuál gana. Documentado pero no protegido.
+- **PKs NULL** — `row_number()` trata los NULLs como su propio grupo y
+  conservaría uno. No filtramos NULLs en PySpark; si aparece una PK NULL,
+  es un bug de calidad de datos upstream que el test `not_null` de dbt va
+  a catchear y fallar ruidosamente, que es el comportamiento que queremos.
+- **Customers sin loans** — `flatten_loans.py` usa `explode` (no
+  `explode_outer`), entonces customers con `loans[]` vacío producen cero filas.
+  Esto es correcto: `silver.stg_loans` es una fact table de loans, no una
+  matriz customer × loan. Métricas como "% de customers con loan" se
+  construyen en Gold vía `LEFT JOIN` desde `dim_customer`.
 
 ### Sanity checks
 
-Each flattener logs three numbers per run:
-- `bronze records read` - how many rows came from `bronze.raw_fintech_data`
-- `<entity> after explode` - how many rows after exploding the array
-- `<entity> after dedup` / `duplicates dropped` - final count vs. dropped
+Cada flattener loguea tres números por corrida:
+- `bronze records read` — cuántas filas vinieron de `bronze.raw_fintech_data`
+- `<entidad> after explode` — cuántas filas después de explotar el array
+- `<entidad> after dedup` / `duplicates dropped` — conteo final vs. droppeados
 
-In a healthy run with N bronze loads of the same dataset, `duplicates
-dropped` should equal `(N-1) × <expected entity count>`. If it's higher, a
-PK collision exists upstream that wasn't there before; if it's lower, a load
-went partial.
+En una corrida sana con N loads de Bronze del mismo dataset, `duplicates
+dropped` debería ser igual a `(N-1) × <conteo esperado de entidad>`. Si es
+mayor, existe una colisión de PK upstream que no estaba antes; si es menor,
+un load quedó parcial.
 
 
 
-## Silver dbt Design Decisions
+## Decisiones de diseño de Silver dbt
 
-### Refined Spark vs dbt responsibility split
+### Refinamiento del split Spark vs dbt
 
-The original split (Spark = syntactic, dbt = semantic) is refined to be more precise:
+El split original (Spark = sintáctico, dbt = semántico) se refina para ser
+más preciso:
 
-- **Spark handles array flattening** (`accounts[]`, `transactions[]`, `loans[]`):
-  cardinality changes via `explode`; distributed compute semantics genuinely apply.
-- **dbt handles flat fields and nested objects** (customer fields, `credit_info{}`,
-  `digital_engagement{}`): cardinality is preserved 1:1 with customer; Postgres
-  `jsonb` operators are both performant (5k rows) and idiomatic.
-- **Deduplication follows the same logic**: array entities (accounts, txns, loans)
-  are deduped in Spark as part of their explode pipeline. Customer dedup happens
-  in dbt because customers are not exploded - they are extracted flat from bronze.
+- **Spark maneja el array flattening** (`accounts[]`, `transactions[]`,
+  `loans[]`): la cardinalidad cambia vía `explode`; la semántica de cómputo
+  distribuido aplica genuinamente.
+- **dbt maneja los campos planos y objetos anidados** (campos de customer,
+  `credit_info{}`, `digital_engagement{}`): la cardinalidad se preserva 1:1
+  con customer; los operadores `jsonb` de Postgres son tanto performantes
+  (5k filas) como idiomáticos.
+- **La deduplicación sigue la misma lógica:** las entidades array (accounts,
+  transactions, loans) se deduplican en Spark como parte de su pipeline de
+  explode. La dedup de customer sucede en dbt porque los customers no se
+  explotan — se extraen planos desde Bronze.
 
-Rationale: the meaningful distinction is *whether explode is needed*, not
-*whether dedup is needed*. Forcing customer through Spark just to dedup would
-require a script that doesn't actually flatten anything, breaking the naming
-convention (`flatten_*`) and introducing a fourth Spark script with no
-distributed-compute justification.
+**Rationale:** la distinción significativa es *si hace falta explode*, no
+*si hace falta dedup*. Forzar a customer a pasar por Spark solo para
+deduplicar requeriría un script que en realidad no aplana nada, rompiendo
+la convención de nombres (`flatten_*`) e introduciendo un cuarto script
+Spark sin justificación de cómputo distribuido.
 
-### Status field divergence (correction to Day 1 EDA notes)
+### Divergencia del campo status (corrección a notas EDA del Día 1)
 
-Earlier notes conflated two `status` fields. Distinct findings:
+Las notas previas confundían dos campos `status`. Hallazgos distintos:
 
-- **`account.status`** (`silver.stg_accounts`): contains `active / frozen / closed`.
-  Diverges from the brief, which specifies `active / inactive / suspended / closed`.
-  Documented divergence; `accepted_values` test reflects observed data.
-- **`customer.status`** (bronze raw): contains 20 surface variants across 4
-  canonical values: `active / inactive / suspended / closed`. **These 4 canonical
-  values exactly match the brief.** Variants are casing chaos (`Active`, `ACTIVE`)
-  plus Spanish translations (`activo`, `suspendido`, `cerrado`, `inactivo`,
-  including their casing variants). 4,223 of 5,000 records (84.5%) use a
-  canonical value; 777 (15.5%) need normalization.
-- Normalization happens in `stg_customers.sql` via lowercase + Spanish→English
-  mapping. `accepted_values` test on the resulting 4 canonical values.
+- **`account.status`** (`silver.stg_accounts`): contiene `active / frozen / closed`.
+  Diverge de la consigna, que especifica `active / inactive / suspended / closed`.
+  Divergencia documentada; el test `accepted_values` refleja la data observada.
+- **`customer.status`** (bronze raw): contiene 20 variantes en superficie
+  pero solo 4 valores canónicos: `active / inactive / suspended / closed`.
+  **Estos 4 valores canónicos coinciden exactamente con la consigna.** Las
+  variantes son caos de casing (`Active`, `ACTIVE`) más traducciones al
+  español (`activo`, `suspendido`, `cerrado`, `inactivo`, incluyendo sus
+  variantes de casing). 4.223 de 5.000 records (84,5%) usan un valor
+  canónico; 777 (15,5%) requieren normalización.
+- La normalización sucede en `stg_customers.sql` vía lowercase + mapping
+  español→inglés. Test `accepted_values` sobre los 4 valores canónicos
+  resultantes.
 
-### Data quality findings (from `silver.dim_customer` audit, dropped today)
+### Hallazgos de calidad de datos (de la auditoría de `silver.dim_customer`, droppeada hoy)
 
-The legacy `silver.dim_customer` table (origin unknown; no script generates it;
-dropped today) was useful as an audit surface and surfaced three findings:
+La tabla legacy `silver.dim_customer` (origen desconocido; ningún script la
+genera; droppeada hoy) fue útil como superficie de auditoría y surfaceó tres
+hallazgos:
 
-- **340 customers (6.8%) have invalid coordinates**: `lat` outside [-90, 90] or
-  `lon` outside [-180, 180]. Likely generator bug in the dataset.
-  Treatment: `is_geo_valid` boolean flag in `dim_customer`; `lat`/`lon` set to
-  NULL when invalid. Preserves the record (no row loss) while making the
-  data quality issue explicit and queryable.
-- **`nationality` equals `country` in 100% of records.** Field is informationally
-  redundant. Treatment: keep in `dim_customer` as a verbatim copy (in case
-  downstream analysis ever differentiates), but add a `dbt_utils.expression_is_true`
-  test asserting equality. If the test ever fails in a future run, that's a
-  signal to revisit.
-- **City names contain typos** (e.g. `Lma` for `Lima`). Treatment: deferred.
-  Documented as known dataset quality issue; will not affect aggregations
-  by `country` (the primary geographic dimension for business questions 2, 6, 10).
+- **340 customers (6,8%) tienen coordenadas inválidas:** `lat` fuera de
+  [-90, 90] o `lon` fuera de [-180, 180]. Probablemente un bug del generador.
+  Tratamiento: flag boolean `is_geo_valid` en `dim_customer`; `lat`/`lon` se
+  setean a NULL cuando son inválidos. Preserva el record (sin pérdida de filas)
+  mientras hace el issue de calidad de datos explícito y queryable.
+- **`nationality` es igual a `country` en 100% de los records.** El campo es
+  informacionalmente redundante. Tratamiento: se mantiene en `dim_customer`
+  como copia verbatim (por si análisis downstream alguna vez los diferencia),
+  pero se agrega un test `dbt_utils.expression_is_true` que asercia igualdad.
+  Si el test falla en alguna corrida futura, es señal para revisitar.
+- **Los nombres de ciudad tienen typos** (ej. `Lma` por `Lima`). Tratamiento:
+  diferido. Documentado como issue conocido del dataset; no afecta a las
+  agregaciones por `country` (la dimensión geográfica primaria para las
+  business questions 2, 6, 10).
 
-### Bucketing definitions
+### Definiciones de bucketing
 
-These cover business questions 9, 11, 21, and partially 5, 6, 7.
+Estas cubren las business questions 9, 11, 21, y parcialmente 5, 6, 7.
 
-**Age buckets** (from `date_of_birth`, computed via `AGE()`):
-- `18-25` — students / early career
-- `26-35` — millennials, peak product acquisition
-- `36-50` — peak earning years
-- `51-65` — pre-retirement
-- `65+` — retirees
+**Age buckets** (desde `date_of_birth`, computado vía `AGE()`):
+- `18-25` — estudiantes / inicio de carrera
+- `26-35` — millennials, pico de adquisición de productos
+- `36-50` — años pico de ingresos
+- `51-65` — pre-jubilación
+- `65+` — jubilados
 
-Rationale: standard LATAM fintech segmentation aligned with life stages and
-product affinity. Anyone under 18 in the data is treated as a data quality
-issue (flagged, not bucketed).
+**Rationale:** segmentación estándar de fintech LATAM alineada con etapas de
+vida y afinidad por productos. Cualquier persona menor a 18 en la data se
+trata como issue de calidad de datos (se flaggea, no se bucketea).
 
-**Tenure buckets** (from `registration_date`, computed via months difference):
-- `new` — < 6 months
-- `established` — 6 to 24 months
-- `loyal` — > 24 months
+**Tenure buckets** (desde `registration_date`, computado vía diferencia de meses):
+- `new` — < 6 meses
+- `established` — 6 a 24 meses
+- `loyal` — > 24 meses
 
-**Risk score buckets** (from `risk_score`, 0-100 numeric):
-- `low` — 0 to 30
-- `medium` — 30 to 60
-- `high` — 60 to 85
-- `critical` — 85 to 100
+**Implementación:** macro `macros/tenure_bucket.sql`. Computa el delta en meses
+totales usando `extract(year from age()) * 12 + extract(month from age())`
+(la forma portable en Postgres — `extract(month from age())` solo devuelve
+el componente de meses [0-11], no el total).
 
-Aligned with business question 9. Boundaries chosen to roughly approximate
-equal-population quartiles based on EDA.
+**Risk score buckets** (desde `risk_score`, 0-100 numeric):
+- `low` — 0 a 30
+- `medium` — 30 a 60
+- `high` — 60 a 85
+- `critical` — 85 a 100
 
-**Credit score buckets** (FICO standard):
+Alineado con la business question 9. Los bordes se eligieron para aproximar
+aproximadamente cuartiles de población igual basado en EDA.
+
+**Credit score buckets** (estándar FICO):
 - `poor` — 300-579
 - `fair` — 580-669
 - `good` — 670-739
 - `very_good` — 740-799
 - `excellent` — 800-850
 
-### Naming conventions for dbt models
+### Convenciones de nombres para modelos dbt
 
-- `stg_*` — staging layer, one model per source table or extracted object.
-  Materialization: view (cheap to rebuild, no aggregation).
-- `dim_*` — dimensions in the silver layer. Materialization: table (joined
-  downstream by gold models).
-- `fact_*` — facts in the silver layer (transactions, loan_snapshots). Tables.
-- Gold marts will use `mart_*` or `gold_*` prefix (decided in Day 6+).
-
-
-### Note on legacy table cleanup
-
-A `silver.dim_customer` table existed at the start of Day 6, origin unknown
-(no Spark script generates it; likely created during Day 1 exploration or
-PoC work). It was dropped manually via `DROP TABLE silver.dim_customer`
-before starting dbt modeling. No reproducible script is included because the
-table is not part of the pipeline — the canonical `dim_customer` is now
-built by dbt and any future clean-clone setup will never produce the legacy
-version.
+- `stg_*` — capa de staging, un modelo por tabla source u objeto extraído.
+  Materialización: view (barato de reconstruir, sin agregación).
+- `dim_*` — dimensiones en la capa Silver. Materialización: table (joineadas
+  downstream por los modelos Gold).
+- `fact_*` — facts en la capa Silver (transactions, loan_snapshots). Tables.
+- Los marts de Gold usan prefijo `mart_*` (decidido en Día 6+).
 
 
-## Silver dbt Design Decisions
+### Nota sobre limpieza de tabla legacy
 
-### Refined Spark vs dbt responsibility split
-
-The original split (Spark = syntactic, dbt = semantic) is refined to be more precise:
-
-- **Spark handles array flattening** (`accounts[]`, `transactions[]`, `loans[]`):
-  cardinality changes via `explode`; distributed compute semantics genuinely apply.
-- **dbt handles flat fields and nested objects** (customer fields, `credit_info{}`,
-  `digital_engagement{}`): cardinality is preserved 1:1 with customer; Postgres
-  `jsonb` operators are both performant (5k rows) and idiomatic.
-- **Customer deduplication lives in dbt**, not Spark. Rationale: customer is not
-  an array — it's the root of each JSON record. A Spark script for customer
-  would not actually flatten anything (no `explode` involved); it would only
-  dedup, which Postgres handles trivially at this volume via `ROW_NUMBER()`.
-  Forcing it through Spark would break the `flatten_*` naming convention and
-  add a script without distributed-compute justification.
-
-The meaningful distinction is *whether explode is needed*, not *whether dedup
-is needed*.
-
-### Customer status field — full picture
-
-Earlier EDA notes (day 1) flagged `status` divergence but conflated two fields.
-Distinct findings:
-
-- **`account.status`** (in `silver.stg_accounts`, produced by Spark): contains
-  only `active / frozen / closed`. Diverges from the brief spec which lists
-  `active / inactive / suspended / closed`. Documented divergence;
-  `accepted_values` test in dbt will reflect the observed three values.
-- **`customer.status`** (in `bronze.raw_fintech_data`): contains 20 surface
-  variants across 4 canonical values. **The 4 canonical values exactly match
-  the brief**: `active / inactive / suspended / closed`. Variants are casing
-  chaos (`Active`, `ACTIVE`) plus Spanish translations (`activo`, `suspendido`,
-  `cerrado`, `inactivo`, with their own casing variants). 4,223 of 5,000 rows
-  (84.5%) use canonical values; 777 (15.5%) require normalization.
-- Normalization is implemented in macro `normalize_customer_status` (lowercase
-  + Spanish→English mapping). Applied in `dim_customer.sql`.
-
-### Data quality findings (from legacy `silver.dim_customer` audit, now dropped)
-
-A legacy `silver.dim_customer` table was found in Postgres at the start of
-day 6, origin unknown (no Spark script generates it; likely created during
-day 1 exploration). It was dropped manually before starting dbt modeling.
-While it was not part of the pipeline, it served as a useful audit surface
-and surfaced three findings now addressed in the canonical dbt-built
-`dim_customer`:
-
-- **340 customers (6.8%) have invalid coordinates**: `lat` outside [-90, 90]
-  or `lon` outside [-180, 180]. Likely a generator bug.
-  Treatment: `is_geo_valid` boolean flag; `lat`/`lon` set to NULL when invalid.
-  Preserves the record while making the data quality issue explicit.
-- **`nationality` equals `country` in 100% of records**. Informationally
-  redundant. Treatment: kept in `dim_customer` (in case downstream ever
-  differentiates) with a `dbt_utils.expression_is_true` test asserting
-  equality. A future test failure would be a useful signal.
-- **City names contain typos** (e.g. `Lma` for `Lima`). Deferred. Aggregations
-  by `country` (the primary geographic dimension for business questions 2, 6,
-  10) are unaffected.
-
-The legacy table is not reproducible from any script; no clean-clone setup
-will produce it. No cleanup SQL committed.
-
-### Bucketing definitions
-
-These support business questions 9, 11, 21, and partially 5, 6, 7. Implemented
-as reusable dbt macros (`age_bucket`, `tenure_bucket`).
-
-**Age buckets** (macro `age_bucket(date_of_birth)`):
-- `under_18` — flagged as data quality issue (banks don't onboard minors)
-- `18-25` — students / early career
-- `26-35` — millennials, peak product acquisition
-- `36-50` — peak earning years
-- `51-65` — pre-retirement
-- `65+` — retirees
-- `unknown` — when `date_of_birth` is NULL or unparseable
-
-**Tenure buckets** (macro `tenure_bucket(registration_date)`):
-- `new` — < 6 months
-- `established` — 6 to 24 months
-- `loyal` — > 24 months
-- `unknown` — when `registration_date` is NULL or unparseable
-
-**Risk score buckets** (deferred to gold layer — only used in business
-question 9, no value adding to dim_customer):
-- `low` (0-30), `medium` (30-60), `high` (60-85), `critical` (85-100)
-
-**Credit score buckets** (deferred to gold layer — used in Q6, lives more
-naturally with credit_info):
-- `poor` (300-579), `fair` (580-669), `good` (670-739),
-  `very_good` (740-799), `excellent` (800-850)
-
-### Customer activity model placement
-
-A `customer_summary` model written in a prior session lives in `models/gold/`.
-On reflection, its grain (1 row per customer) and contents (identity +
-product counts) make it a **silver-layer aggregate**, not a gold mart. It is
-moved to `models/silver/agg_customer_activity.sql`. Rationale:
-
-- Gold marts in this project will use a `mart_*` or `gold_*` prefix and have
-  business-question-specific grains (customer-month, segment-month, loan,
-  etc.). A per-customer count table doesn't belong with them.
-- An `agg_*` prefix in silver honestly describes the model: it's an aggregate,
-  not a fact (no transactional grain) and not a dimension (has measures, not
-  attributes).
-- Snapshot semantics: refreshed full per run, not slowly changing.
-
-### Naming conventions for dbt models
-
-- `stg_*` — staging, one model per source. Materialization: view.
-- `dim_*` — dimensions in silver. Materialization: table.
-- `fact_*` — transactional facts in silver (e.g. `fact_transactions`,
-  `fact_loan_payments` if added). Materialization: table.
-- `agg_*` — aggregates in silver (e.g. `agg_customer_activity`).
-  Materialization: table.
-- Gold marts (day 7+) — prefix to be decided, likely `mart_*` or `gold_*`.
+Una tabla `silver.dim_customer` existía al inicio del Día 6, de origen
+desconocido (ningún script de Spark la genera; probablemente creada durante
+exploración del Día 1 o trabajo PoC). Fue droppeada manualmente vía
+`DROP TABLE silver.dim_customer` antes de empezar el modelado en dbt. No
+se incluye script reproducible porque la tabla no es parte del pipeline —
+la `dim_customer` canónica ahora la construye dbt y cualquier setup de
+clean-clone futuro nunca producirá la versión legacy.
 
 
-### Generalized pattern: all customer-level categoricals need normalization
+### Patrón generalizado: todos los categóricos a nivel customer necesitan normalización
 
-Day 6 testing surfaced that the casing chaos + Spanish translation pattern
-documented for `customer.status` is NOT isolated to that field. It is a
-**generator-wide pattern** affecting every categorical field in the dataset:
+El testing del Día 6 reveló que el patrón de caos de casing + traducción al
+español documentado para `customer.status` NO está aislado a ese campo. Es
+un **patrón generalizado del generador** que afecta a todo campo categórico
+del dataset:
 
-- `customer.status` — 20 variants, ~15.5% non-canonical (documented day 1).
-- `customer.kyc_status` — 8 variants, ~7.6% non-canonical. Only casing
-  variants (no Spanish translations). Normalized via `normalize_kyc_status`.
-- `customer.customer_segment` — 16 variants, ~15.7% non-canonical. Both
-  casing and Spanish translations. Normalized via `normalize_customer_segment`.
+- `customer.status` — 20 variantes, ~15,5% no-canónico (documentado en Día 1).
+- `customer.kyc_status` — 8 variantes, ~7,6% no-canónico. Solo variantes de
+  casing (sin traducciones al español). Normalizado vía `normalize_kyc_status`.
+- `customer.customer_segment` — 16 variantes, ~15,7% no-canónico. Tanto
+  casing como traducciones al español. Normalizado vía
+  `normalize_customer_segment`.
 
-Implication for downstream silver models: any categorical field arriving
-from bronze (transactions.channel, transactions.category, transactions.type,
-transactions.status, accounts.account_type, loans.type, loans.status,
-gender, etc.) must be assumed to have casing/translation variants until
-empirically proven otherwise. Each gets its own `normalize_*` macro
-following the same pattern (lowercase+trim, optional ES→EN CASE map,
-else-passthrough so unexpected values fail tests loudly).
+**Implicancia para los modelos Silver downstream:** cualquier campo
+categórico que llegue de Bronze (transactions.channel, transactions.category,
+transactions.type, transactions.status, accounts.account_type, loans.type,
+loans.status, gender, etc.) debe asumirse que tiene variantes de
+casing/traducción hasta probarse empíricamente lo contrario. Cada uno tiene
+su propia macro `normalize_*` siguiendo el mismo patrón (lowercase+trim,
+mapa CASE ES→EN opcional, else-passthrough para que valores inesperados
+fallen los tests ruidosamente).
 
 
-### Tests configured as `warn` for documented data quality issues
+### Tests configurados como `warn` para issues de calidad de datos documentados
 
-Some `not_null` tests are intentionally set to `severity: warn` instead of
-the default error level. This captures data quality issues from the source
-generator without blocking the build. Affected fields:
+Algunos tests `not_null` están seteados intencionalmente con `severity: warn`
+en lugar del nivel default error. Esto captura issues de calidad de datos
+del generador source sin bloquear el build. Campos afectados:
 
-- `silver.stg_accounts.balance` — 486 NULLs (2.8%), uniformly distributed
-  across all account_types. Confirmed not a parsing or join issue;
-  comes as NULL in the bronze JSON for those records.
+- `silver.stg_accounts.balance` — 486 NULLs (2,8%), uniformemente
+  distribuidos entre todos los `account_type`. Confirmado que no es un
+  issue de parsing o join; viene como NULL en el JSON de Bronze para esos
+  records.
 
-The pattern is: if a test fails because of generator data quality (not
-because of a bug in our code), warn lets the issue stay visible in
-`dbt test` output while keeping the pipeline runnable. If the dataset is
-ever refreshed and the NULL rate changes significantly, we'll see it
-in the warn count.
+**El patrón es:** si un test falla por calidad de datos del generador (no
+por un bug en nuestro código), `warn` deja el issue visible en el output de
+`dbt test` mientras mantiene el pipeline funcionando. Si el dataset alguna
+vez se refresca y la tasa de NULLs cambia significativamente, lo veremos en
+el conteo de warns.
 
-## Staging models, dimensions, and aggregate
+## Modelos staging, dimensions y aggregate
 
-### Macro architecture: normalize_casing + entity-specific specifics
+### Arquitectura de macros: normalize_casing + específicos por entidad
 
-Adopted "Option C" macro hierarchy:
-- `normalize_casing(col)` — base macro doing `lower(trim(col))`.
-- `normalize_<entity>_<field>(col)` — thin or rich wrappers using the base.
+Se adoptó la jerarquía de macros "Opción C":
+- `normalize_casing(col)` — macro base que hace `lower(trim(col))`.
+- `normalize_<entidad>_<campo>(col)` — wrappers thin o rich usando la base.
 
-Thin wrappers (just delegate to normalize_casing): `normalize_kyc_status`,
+**Thin wrappers** (solo delegan a normalize_casing): `normalize_kyc_status`,
 `normalize_transaction_status`, `normalize_loan_status`, `normalize_loan_type`.
-These exist for naming consistency: call sites read as
-`{{ normalize_kyc_status(...) }}` (intent-revealing) rather than
-`{{ normalize_casing(...) }}` (generic).
+Existen por consistencia de nombres: los call sites se leen como
+`{{ normalize_kyc_status(...) }}` (revelador de intención) en lugar de
+`{{ normalize_casing(...) }}` (genérico).
 
-Rich wrappers (lowercase + Spanish-to-English mapping):
+**Rich wrappers** (lowercase + mapping español-a-inglés):
 `normalize_customer_status`, `normalize_customer_segment`,
 `normalize_account_status`, `normalize_transaction_type`,
 `normalize_transaction_category`, `normalize_collateral_type`.
 
-For `account_type` and `transaction.channel`, `normalize_casing` is applied
-inline in the model (no dedicated macro) because the field has only casing
-variants and creating a macro for a one-liner would be ritualistic.
+Para `account_type` y `transaction.channel`, `normalize_casing` se aplica
+inline en el modelo (sin macro dedicada) porque el campo tiene solo
+variantes de casing y crear una macro para un one-liner sería ritualístico.
 
-### Schema separation: silver_raw (Spark) vs silver (dbt)
+### Separación de schema: silver_raw (Spark) vs silver (dbt)
 
-Day 6 discovered a name collision: Spark wrote to `silver.stg_accounts` and
-dbt tried to create a view at the same fully-qualified name. dbt silently
-failed to materialize, causing tests to run against the raw Spark output
-instead of the normalized view.
+El Día 6 descubrió una colisión de nombres: Spark escribía a
+`silver.stg_accounts` y dbt trataba de crear una view con el mismo nombre
+fully-qualified. dbt fallaba silenciosamente en materializar, causando que
+los tests corrieran contra el output crudo de Spark en lugar de la view
+normalizada.
 
-Fix: introduced `silver_raw` schema for Spark outputs. dbt reads from
-`silver_raw.stg_*` (declared as source) and writes views/tables to `silver`.
+**Fix:** se introdujo el schema `silver_raw` para los outputs de Spark.
+dbt lee de `silver_raw.stg_*` (declarado como source) y escribe views/tables
+a `silver`.
 
-Implementation:
-- Added `SPARK_TARGET_SCHEMA` env var to `.env`, `env.example`, `docker-compose.yml`.
-- Created `TARGET_SCHEMA` constant in `spark/utils.py` reading from env.
-- Updated 3 Spark flatten scripts to use `f"{TARGET_SCHEMA}.stg_<name>"`.
-- Updated `dbt/models/sources.yml`: `schema: silver_raw`.
-- Migrated existing tables with `ALTER TABLE ... SET SCHEMA silver_raw`.
+**Implementación:**
+- Se agregó variable de entorno `SPARK_TARGET_SCHEMA` a `.env`, `env.example`,
+  `docker-compose.yml`.
+- Se creó constante `TARGET_SCHEMA` en `spark/utils.py` que lee de env.
+- Se actualizaron los 3 scripts de flatten de Spark para usar
+  `f"{TARGET_SCHEMA}.stg_<name>"`.
+- Se actualizó `dbt/models/sources.yml`: `schema: silver_raw`.
+- Se migraron las tablas existentes con `ALTER TABLE ... SET SCHEMA silver_raw`.
 
-The default value `silver_raw` is hardcoded in `utils.py` so the script
-works even if the env var is missing; the env var allows overriding for
-test environments or future production deployments.
+El valor default `silver_raw` está hardcodeado en `utils.py` para que el
+script funcione aún si la env var falta; la env var permite override para
+ambientes de test o deployments futuros de producción.
 
-### Date parsing centralization
+### Centralización del parsing de fechas
 
-Spark's `to_date("yyyy-MM-dd")` silently NULL-ed any non-ISO date. EDA
-discovered 4 formats in date fields across the dataset:
+El `to_date("yyyy-MM-dd")` de Spark silenciosamente NULL-eaba cualquier
+fecha no-ISO. El EDA descubrió 4 formatos en los campos de fecha del dataset:
 - ISO (~91%): `2026-05-08`
-- Compact (~3%): `20260613`
+- Compacto (~3%): `20260613`
 - Slash DMY (~3%): `26/04/2026`
 - Dash MDY (~3%): `06-13-2024`
 
-Decision: Spark passes dates as text; dbt's `parse_date_multi_format` macro
-handles all 4 formats. Rationale: choosing which formats are valid is a
-semantic decision, not a syntactic one. Per the responsibility split, dbt
-owns it.
+**Decisión:** Spark pasa las fechas como text; la macro `parse_date_multi_format`
+de dbt maneja los 4 formatos. **Rationale:** elegir qué formatos son válidos
+es una decisión semántica, no sintáctica. Según la división de responsabilidades,
+dbt es dueño.
 
-Used by: `dim_customer` (date_of_birth, registration_date), `stg_accounts`
-(opened_date), `stg_transactions` (transaction_date), `stg_loans`
-(start_date, end_date).
+**Usado por:** `dim_customer` (date_of_birth, registration_date), `stg_accounts`
+(opened_date), `stg_transactions` (transaction_date), `stg_loans` (start_date,
+end_date).
 
-### Generalized data quality patterns
+### Patrones generalizados de calidad de datos
 
-Day 6 confirmed and extended the generator's data quality patterns:
-- **Casing chaos + Spanish translations** affect every categorical field
+El Día 6 confirmó y extendió los patrones de calidad de datos del generador:
+- **Caos de casing + traducciones al español** afectan todo campo categórico
   (customer.status, customer.kyc_status, customer.customer_segment,
   account.status, transaction.type, transaction.status, transaction.category,
   loan.status, loan.type, loan.collateral_type, digital_engagement.preferred_channel).
-- **Missing markers as strings** (`''`, `'NA'`, `'N/A'`, `'null'`, `'NULL'`)
-  appear in text categoricals AND in numeric fields. The `safe_cast_numeric`
-  macro NULL-s all 5 markers before casting.
-- **Non-parseable numeric strings** (`'$78.26'`, `'89.5 USD'`, `'83,5'`)
-  appear in 38 records of utilization_pct (0.4%). The safe_cast_numeric
-  macro returns NULL for any string not matching `^-?[0-9]+\.?[0-9]*$`.
-- **Out-of-range sentinels** in credit_score (~10%): values like 999999, 0,
-  negatives. Handled via the raw + flag + validated pattern.
+- **Marcadores de missing como strings** (`''`, `'NA'`, `'N/A'`, `'null'`,
+  `'NULL'`) aparecen en categóricos de texto Y en campos numéricos. La macro
+  `safe_cast_numeric` NULL-ea los 5 marcadores antes de castear.
+- **Strings numéricos no-parseables** (`'$78.26'`, `'89.5 USD'`, `'83,5'`)
+  aparecen en 38 records de utilization_pct (0,4%). La macro safe_cast_numeric
+  devuelve NULL para cualquier string que no matchee `^-?[0-9]+\.?[0-9]*$`.
+- **Sentinelas fuera de rango** en credit_score (~10%): valores como 999999,
+  0, negativos. Manejados vía el patrón raw + flag + validated.
 
-### Raw + flag + validated pattern
+### Patrón raw + flag + validated
 
-Applied consistently for fields with genuine data quality issues that
-cannot be cleanly recovered:
-- `dim_customer.lat/lon` + `is_geo_valid` (6.8% invalid coordinates).
-- `stg_credit_info.credit_score_raw` + `is_credit_score_valid` + `credit_score` (10% out of range).
-- `stg_credit_info.utilization_pct_raw` + `is_utilization_pct_valid` + `utilization_pct` (0.4% unparseable + range issues).
+Aplicado consistentemente para campos con issues genuinos de calidad de
+datos que no se pueden recuperar limpiamente:
+- `dim_customer.lat/lon` + `is_geo_valid` (6,8% coordenadas inválidas).
+- `stg_credit_info.credit_score_raw` + `is_credit_score_valid` + `credit_score` (10% fuera de rango).
+- `stg_credit_info.utilization_pct_raw` + `is_utilization_pct_valid` + `utilization_pct` (0,4% no-parseable + issues de rango).
 
-The pattern preserves the original value for audit, exposes a boolean for
-filtering, and provides a NULL-ed validated version for aggregations.
+El patrón preserva el valor original para audit, expone un boolean para
+filtrado, y provee una versión validada NULL-eada para agregaciones.
 
-### EUR currency in transactions
+### Currency EUR en transactions
 
-Transactions contain ~1% of activity in EUR (924 rows). EUR is NOT present
-in accounts. Likely cross-border activity. Documented in stg_transactions
-yaml; relevant for business question 19 (international transfer patterns).
+Transactions contiene ~1% de actividad en EUR (924 filas). EUR NO está
+presente en accounts. Probablemente actividad cross-border. Documentado en
+el yaml de stg_transactions; relevante para la business question 19 (patrones
+de transferencia internacional).
 
-### Tests configured as `warn` for documented data quality issues
+### Tests configurados como `warn` para issues de calidad de datos documentados
 
-- `stg_accounts.balance` — 486 NULLs (2.8%), uniformly distributed.
-- `stg_transactions.amount` — 2619 NULLs (3.0%), uniformly distributed.
+- `stg_accounts.balance` — 486 NULLs (2,8%), uniformemente distribuidos.
+- `stg_transactions.amount` — 2.619 NULLs (3,0%), uniformemente distribuidos.
 
-Both are generator data quality, not parsing or join issues. Warn surfaces
-them without blocking the build.
+Ambos son calidad de datos del generador, no issues de parsing o join. Warn
+los surfacea sin bloquear el build.
 
-### customer_summary moved from gold to silver as agg_customer_activity
+### customer_summary movido de gold a silver como agg_customer_activity
 
-Originally created in a prior session as gold.customer_summary. On
-reflection during day 6, its grain (1 row per customer) and contents
-(activity counts) fit a silver aggregate, not a business mart. Renamed
-to agg_customer_activity in silver. Old gold model dropped (file deleted,
-Postgres table dropped via CASCADE).
+Originalmente creado en una sesión previa como `gold.customer_summary`. Tras
+reflexión durante el Día 6, su grain (1 fila por customer) y contenido
+(conteos de actividad) calza mejor como agregado de silver, no como mart de
+negocio. Renombrado a `agg_customer_activity` en silver. El modelo gold
+viejo se droppeó (archivo eliminado, tabla en Postgres droppeada vía
+CASCADE).
 
-### dim_geography is hardcoded, not derived
+### dim_geography es hardcoded, no derivado
 
-7 countries from the spec (CO, UY, AR, MX, CL, PE, BR), implemented with
-`VALUES` in the model. Region is hardcoded as 'LATAM' for future
-extensibility. City is NOT in this dimension because of typos in
-dim_customer.city (e.g., 'Lma' for 'Lima'); customer.city can be used
-directly when needed.
+7 países de la consigna (CO, UY, AR, MX, CL, PE, BR), implementado con
+`VALUES` en el modelo. La región está hardcodeada como 'LATAM' para
+extensibilidad futura. La ciudad NO está en esta dimensión por los typos en
+`dim_customer.city` (ej. `Lma` por `Lima`); `customer.city` puede usarse
+directamente cuando se necesita.
 
+### Tag v0.2.0-silver (cierre Silver layer)
 
+```bash
 git tag -a v0.2.0-silver -m "Silver layer complete: PySpark flattening + dbt cleaning, dimensions, facts, 160 tests passing (7 warns documented as generator DQ)"
 git push origin main
 git push origin v0.2.0-silver
+```
 
 
 ## Diseño de Gold + primeros 3 marts
@@ -990,9 +916,9 @@ git push origin v0.2.0-silver
 
 ### 1. Arquitectura: 8 marts cubriendo 24 preguntas
 
-Mapeo mart → preguntas:
+Mapeo mart → preguntas (**diseño original Día 8 — superseded por Día 9**):
 
-| Mart | Grano | Preguntas |
+| Mart (Día 8) | Grano | Preguntas |
 |------|-------|-----------|
 | `mart_customer_360` | 1 fila/customer | Q1, Q9, Q10, Q11, Q13, Q14, Q24 + credit profile |
 | `mart_revenue_by_segment` | segment × month | Q1 (rollup) |
@@ -1004,6 +930,32 @@ Mapeo mart → preguntas:
 | `mart_international_transfers` | currency_pair × month | Q19 |
 
 Cobertura: 24/24. **No** crear un mart por pregunta — la consigna evalúa "reusability and clarity of metrics" y "model design quality", lo cual penaliza redundancia.
+
+**Actualización Día 9:** durante la construcción se identificó que varios de
+estos marts agrupaban preguntas con grano genuinamente diferente y diluían
+la claridad. Se split-earon en versiones más específicas. Mapeo final
+(implementado en `dbt/models/gold/`):
+
+| Mart (final, 16 total) | Grano | Preguntas |
+|------|-------|-----------|
+| `mart_acquisition_trend` | month | Q12 |
+| `mart_customer_360` | 1 fila/customer | Q1 (rollup), Q9, Q10, Q11, Q13, Q14, Q24 |
+| `mart_revenue_by_segment_usd` | segment | Q1 (USD) |
+| `mart_account_mix` | country × account_type × currency | Q2, Q22 |
+| `mart_delinquency_by_segment` | segment | Q5 |
+| `mart_credit_score_by_country` | country × score_bucket | Q6 |
+| `mart_utilization_vs_delinquency` | utilization_bucket | Q7 |
+| `mart_risk_buckets` | risk_bucket | Q9 |
+| `mart_loan_dpd` | loan_type × dpd_bucket × currency | Q8 |
+| `mart_loan_composition` | loan_type × status × currency | Q4, Q23 |
+| `mart_tx_by_channel` | channel × currency | Q3, Q17, Q18 |
+| `mart_tx_by_category` | category × currency | Q15 |
+| `mart_tx_by_dow` | day_of_week × currency | Q16 |
+| `mart_international_transfers` | origin_country × tx_currency | Q19 |
+| `mart_digital_adoption_by_segment` | segment | Q20 |
+| `mart_channel_preference_by_age` | age_bucket × channel | Q21 |
+
+Cobertura final: 24/24 (23 ✅ + Q13 ⚠️ documentado con divergencia spec/dataset).
 
 ---
 
@@ -1170,9 +1122,22 @@ when {{ x }} >  30 and {{ x }} <= 60 then 'medium'
 
 ### 12. Multi-currency en `mart_account_mix`: no convertir, granular por currency
 
-El dataset no incluye tabla de tasas FX. Sumar `balance` entre USD y ARS sería matemáticamente incorrecto. Decisión: marts que agregan balance llevan `currency` en el grano y evitan conversión inventada. Mejora futura: `dim_fx_rate` (manual o desde API) + `mart_balances_usd` consolidado.
+**Decisión original (Día 8):** el dataset no incluía tabla de tasas FX. Sumar
+`balance` entre USD y ARS sería matemáticamente incorrecto. Decisión: marts
+que agregan balance llevan `currency` en el grano y evitan conversión
+inventada.
 
-Resultado en `mart_account_mix`: grano = `country × account_type × currency`. Q22 (popularidad por type) sale agregando por type. Q2 (balances por country) sale agregando por country mostrando currencies por país. El dashboard puede filtrar por moneda o mostrar lado a lado.
+Resultado en `mart_account_mix`: grano = `country × account_type × currency`.
+Q22 (popularidad por type) sale agregando por type. Q2 (balances por country)
+sale agregando por country mostrando currencies por país. El dashboard puede
+filtrar por moneda o mostrar lado a lado.
+
+**Actualización Día 9:** se agregó `seeds/fx_rates.csv` con conversiones USD
+para las 8 monedas LATAM + EUR. `mart_revenue_by_segment_usd` consume este
+seed. `mart_account_mix` **mantiene grano por currency** (decisión preservada)
+porque balances típicamente se reportan en moneda nativa para audit, mientras
+que revenue cross-country sí requiere unificación a USD. Power BI puede
+aplicar conversión via join con `fx_rates` cuando el caso lo demande.
 
 ---
 
@@ -1186,8 +1151,14 @@ Resultado en `mart_account_mix`: grano = `country × account_type × currency`. 
 - `silver.dim_credit_info` — credit_score, utilization, late_payments, bankruptcy_flag
 - `silver.dim_digital_engagement` — mobile_app, web_banking
 - `silver.agg_customer_activity` — accounts_count, loans_count, transactions_count, total_products (Q24)
-- `silver.fct_transactions` + `silver.dim_account` — `total_fees_paid` (only `status='completed'`)
-- `silver.fct_loans` — `monthly_interest_income` (only `status IN ('current','delinquent')`)
+- `silver.int_customer_monthly_revenue` — revenue centralizado (fees + interest, native + USD).
+  Ver sección "Refactor: int_customer_monthly_revenue" (Día 10) para la definición completa.
+
+**Nota Día 10:** las columnas de revenue del intermediate (`monthly_fee_revenue_native`,
+`monthly_interest_revenue_native`, `total_monthly_revenue_native`) se renombran
+dentro del mart al convention pre-refactor (`monthly_fee_revenue`, `monthly_interest_income`,
+`total_revenue_monthly`) en un CTE `revenue` para preservar el contrato downstream
+con Power BI sin tocar dashboards.
 
 **Columnas finales (30):** identity (1) + demographics (5) + relationship (5) + risk (2) + credit profile (8) + digital (2) + products (4) + revenue (3).
 
@@ -1227,45 +1198,48 @@ Las comillas simples evitan que PowerShell expanda `$POSTGRES_USER` antes de man
 
 ---
 
-## Business definitions for Gold marts
+## Definiciones de negocio para los marts Gold
 
-These decisions are upstream of all six Gold marts built on Day 9. Each one
-is a deliberate trade-off between simplicity, professional defensibility,
-and dashboard expressiveness. The rationale is preserved here so the
-choice can be re-evaluated if business context changes.
+Estas decisiones son upstream de todos los marts Gold construidos en el
+Día 9. Cada una es un trade-off deliberado entre simplicidad, defensibilidad
+profesional, y expresividad del dashboard. El rationale se preserva acá
+para que la elección se pueda re-evaluar si el contexto de negocio cambia.
 
 ### 1. Revenue
 
 `revenue = fee_income + interest_income_accrued`
 
-- `fee_income = SUM(transactions.amount)` where `type = 'fee' AND status = 'completed'`
-  Only completed fees count; failed/reversed/pending are excluded.
-- `interest_income_accrued (monthly) = SUM(loans.outstanding_balance * interest_rate / 12)`
-  where `loans.status IN ('current', 'delinquent')`.
-  `paid_off` and `default` loans do not accrue (the former is settled,
-  the latter would move to non-accrual in real banking accounting).
+- `fee_income = SUM(transactions.amount)` donde `type = 'fee' AND status = 'completed'`.
+  Solo las fees `completed` cuentan; failed/reversed/pending se excluyen.
+- `interest_income_accrued (mensual) = SUM(loans.outstanding_balance * interest_rate / 12)`
+  donde `loans.status IN ('current', 'delinquent')`. Los loans `paid_off`
+  y `default` no devengan interés (el primero está saldado, el segundo
+  pasaría a non-accrual en contabilidad bancaria real).
 
-**Trade-off documented:** interchange fees (merchant commissions on card
-transactions) are excluded because the dataset has no field for them.
-This would be a real revenue component in a production bank.
+**Trade-off documentado:** las interchange fees (comisiones de comercio
+sobre transacciones de tarjeta) se excluyen porque el dataset no tiene un
+campo para ellas. Esto sería un componente real de revenue en un banco
+de producción.
 
 ### 2. Delinquency
 
-Two non-exclusive flags, both derived from `days_past_due` (not `status`):
+Dos flags no-exclusivos, ambos derivados de `days_past_due` (no de `status`):
 
-- `is_delinquent = days_past_due >= 30` — operational/collections metric
-- `is_default    = days_past_due >= 90 OR status = 'default'` — regulatory (Basel/IFRS9 standard)
+- `is_delinquent = days_past_due >= 30` — métrica operacional/de cobranzas
+- `is_default = days_past_due >= 90 OR status = 'default'` — regulatorio
+  (estándar Basel/IFRS9)
 
-**DPD takes precedence over the `status` field** in case of conflict
-(e.g., status='current' but DPD=45). The model emits a count of such
-conflicts as a soft warning, without failing the build.
+**El DPD tiene precedencia sobre el campo `status`** en caso de conflicto
+(ej. status='current' pero DPD=45). El modelo emite un conteo de tales
+conflictos como soft warning, sin fallar el build.
 
-### 3. Days past due buckets
+### 3. Buckets de días en mora (DPD)
 
-Six aging buckets aligned with standard banking convention. Numeric
-prefixes ensure correct alphabetical ordering in Power BI visuals.
+Seis aging buckets alineados con la convención bancaria estándar. Los
+prefijos numéricos aseguran ordenamiento alfabético correcto en visuales
+de Power BI.
 
-| Bucket label             | DPD range  |
+| Label del bucket         | Rango DPD  |
 |--------------------------|------------|
 | `00 - Current`           | 0          |
 | `01 - Early (1-29)`      | 1-29       |
@@ -1274,31 +1248,32 @@ prefixes ensure correct alphabetical ordering in Power BI visuals.
 | `04 - 90-179 DPD`        | 90-179     |
 | `05 - 180+ DPD`          | 180+       |
 
-Cuts at 30/60/90/180 match IFRS9 and common charge-off thresholds.
+Los cortes en 30/60/90/180 coinciden con IFRS9 y los thresholds comunes
+de charge-off.
 
-### 4. Credit utilization buckets
+### 4. Buckets de utilización de crédito
 
-Six buckets. NULLs aisolated, over-100% explicitly separated (since EDA
-confirmed real values > 100% in the source data — these represent
-financial stress, not corruption).
+Seis buckets. NULLs aislados, over-100% explícitamente separados (ya que
+el EDA confirmó valores reales > 100% en la data source — representan
+estrés financiero, no corrupción).
 
-| Bucket label                | Utilization range |
-|-----------------------------|-------------------|
-| `01 - Healthy (<30%)`       | < 30              |
-| `02 - Moderate (30-60%)`    | 30-60             |
-| `03 - High (60-90%)`        | 60-90             |
-| `04 - Maxed (90-100%)`      | 90-100            |
-| `05 - Over-limit (>100%)`   | > 100             |
-| `99 - Unknown`              | NULL              |
+| Label del bucket            | Rango de utilización |
+|-----------------------------|----------------------|
+| `01 - Healthy (<30%)`       | < 30                 |
+| `02 - Moderate (30-60%)`    | 30-60                |
+| `03 - High (60-90%)`        | 60-90                |
+| `04 - Maxed (90-100%)`      | 90-100               |
+| `05 - Over-limit (>100%)`   | > 100                |
+| `99 - Unknown`              | NULL                 |
 
-### 5. Credit score buckets
+### 5. Buckets de credit score
 
-FICO convention (industry standard). Seven values total: silver retains
-out-of-range values as-is (already cast to int), so the Gold mart aisolates
-them in a dedicated `00 - Invalid` bucket rather than letting them
-contaminate `01 - Poor` or `05 - Excellent`.
+Convención FICO (estándar de industria). Siete valores en total: Silver
+retiene los valores fuera de rango como están (ya casteados a int), así
+que el mart Gold los aísla en un bucket dedicado `00 - Invalid` en lugar
+de dejarlos contaminar `01 - Poor` o `05 - Excellent`.
 
-| Bucket label                  | Score range                       |
+| Label del bucket              | Rango de score                    |
 |-------------------------------|-----------------------------------|
 | `00 - Invalid (out of range)` | NOT BETWEEN 300 AND 850           |
 | `01 - Poor (300-579)`         | 300-579                           |
@@ -1308,43 +1283,47 @@ contaminate `01 - Poor` or `05 - Excellent`.
 | `05 - Excellent (800-850)`    | 800-850                           |
 | `99 - Unknown`                | NULL                              |
 
-### 6. Age buckets
+### 6. Buckets de edad
 
-Neutral decade-based ranges. The project brief uses the neutral phrase
-"age group" (Q21), and generational labels (Gen Z, Millennial...) have
-contested cutoffs depending on the source (Pew vs Strauss-Howe etc.),
-so neutral bins are preferred.
+Rangos neutrales basados en décadas. La consigna del proyecto usa la frase
+neutral "age group" (Q21), y los labels generacionales (Gen Z, Millennial...)
+tienen cortes disputados según la fuente (Pew vs Strauss-Howe, etc.), así
+que se prefieren bins neutrales.
 
-| Bucket label    | Age range |
-|-----------------|-----------|
-| `01 - 18-24`    | 18-24     |
-| `02 - 25-34`    | 25-34     |
-| `03 - 35-44`    | 35-44     |
-| `04 - 45-54`    | 45-54     |
-| `05 - 55-64`    | 55-64     |
-| `06 - 65+`      | 65+       |
-| `99 - Unknown`  | NULL      |
+| Label del bucket | Rango de edad |
+|-----------------|---------------|
+| `01 - 18-24`    | 18-24         |
+| `02 - 25-34`    | 25-34         |
+| `03 - 35-44`    | 35-44         |
+| `04 - 45-54`    | 45-54         |
+| `05 - 55-64`    | 55-64         |
+| `06 - 65+`      | 65+           |
+| `99 - Unknown`  | NULL          |
 
-`age` is already derived in silver from `date_of_birth`.
+`age` ya está derivada en Silver desde `date_of_birth`.
 
-### 7. Currency strategy
+### 7. Estrategia de currency
 
-Hybrid: **five marts in local currency, one mart in USD.**
+Híbrida: **15 marts en moneda nativa, 1 mart en USD.**
 
-- `mart_transactions_summary`, `mart_loan_portfolio`, `mart_credit_risk`,
-  `mart_digital_engagement`, `mart_international_transfers` operate in
-  the original (local) currency. Most of them are not monetary
-  (engagement, risk buckets) or are naturally segmented by country/currency
-  (loans, transfers).
-- `mart_revenue_by_segment_usd` applies FX conversion to USD. Required
-  because revenue-per-segment crosses countries and demands a common unit.
+Los marts que reportan cifras monetarias (account_mix, loan_composition,
+loan_dpd, tx_by_channel, tx_by_category, tx_by_dow, international_transfers,
+customer_360 en su sección de revenue native) operan en la **moneda original**
+del registro, con `currency` incluido en el grano cuando aplica. Esto evita
+sumar incompatibilidades (USD + ARS sin tasa).
 
-**Infrastructure (shared):**
+Solo `mart_revenue_by_segment_usd` aplica conversión a USD: revenue-per-segment
+cruza países y demanda una unidad común para comparabilidad. Customer-grain
+revenue se expone tanto en native (consumido por `mart_customer_360`) como
+en USD (consumido por `mart_revenue_by_segment_usd`) desde el intermediate
+`int_customer_monthly_revenue`.
+
+**Infraestructura (compartida):**
 - `seeds/fx_rates.csv` — currency → `rate_to_usd`, as_of_date
-- `seeds/country_currency.csv` — ISO country code → local currency code
-- Macro `{{ to_usd(amount, currency) }}` — wraps the FX lookup
+- `seeds/country_currency.csv` — código ISO de país → código de moneda local
+- Macro `{{ to_usd(amount, currency) }}` — wraps el lookup de FX
 
-**FX rates (mid-market snapshot, May 2026):**
+**Tasas FX (snapshot mid-market, mayo 2026):**
 
 | Currency | rate_to_usd |
 |----------|-------------|
@@ -1357,310 +1336,374 @@ Hybrid: **five marts in local currency, one mart in USD.**
 | PEN      | 0.270000    |
 | BRL      | 0.200000    |
 
-Sources: Xe.com, exchange-rates.org, tradingeconomics.com (May 2026).
-In production this would be replaced by a daily FX feed.
+Fuentes: Xe.com, exchange-rates.org, tradingeconomics.com (mayo 2026). En
+producción esto se reemplazaría por un feed FX diario.
 
-**Insight from EDA (documented, not blocking):** the dataset shows
-~50% USD-denominated activity across the LATAM region, reflecting
-real-world dollarization patterns (notably UY and AR). This is a
-business finding, not a data quality issue.
+**Insight del EDA (documentado, no bloqueante):** el dataset muestra ~50%
+de actividad denominada en USD a lo largo de la región LATAM, reflejando
+patrones reales de dolarización (notablemente UY y AR). Esto es un hallazgo
+de negocio, no un issue de calidad de datos.
 
-### 8. International transfer
+### 8. Transferencia internacional
 
 `is_international = (type = 'transfer'
                      AND tx_currency != account_currency
                      AND tx_currency != customer_country_currency)`
 
-The strictest of three considered definitions: a transfer is only
-international if its currency differs from **both** the originating
-account's currency **and** the customer's home country currency. This
-minimizes false positives (e.g., a Uruguayan with a USD account sending
-USD to another USD account is correctly classified as domestic).
+La más estricta de tres definiciones consideradas: una transferencia es
+internacional solo si su currency difiere de **ambos** el currency de la
+cuenta originaria **y** el currency del país hogar del customer. Esto
+minimiza falsos positivos (ej. un uruguayo con cuenta USD enviando USD a
+otra cuenta USD se clasifica correctamente como doméstica).
 
-The country→currency mapping is materialized as a seed
-(`seeds/country_currency.csv`) to keep the logic out of the model SQL
-and consistent with the FX seed pattern.
+El mapping país→currency se materializa como seed
+(`seeds/country_currency.csv`) para mantener la lógica fuera del SQL del
+modelo y consistente con el patrón del seed FX.
 
-**Limitation documented:** without destination account data, this is
-still a proxy. A cross-border USD-to-USD transfer that requires no FX
-would be classified as domestic, which is acceptable for revenue
-attribution purposes but not for AML reporting.
+**Limitación documentada:** sin data de la cuenta destino, esto sigue
+siendo un proxy. Una transferencia cross-border USD-a-USD que no requiere
+FX se clasificaría como doméstica, lo cual es aceptable para propósitos
+de atribución de revenue pero no para reportes AML.
 
 ---
 
-### Bug found: temporal scale mismatch in revenue
+### Bug encontrado: mismatch de escala temporal en revenue
 
-After fixing the interest_rate scale (100x), the revenue numbers were
-still 1-2 orders of magnitude too high: ~$19k/customer/month in USD,
-where banking benchmarks suggest ~$50-500/customer/month.
+Después de arreglar la escala de interest_rate (100x), los números de
+revenue seguían siendo 1-2 órdenes de magnitud demasiado altos:
+~$19k/customer/mes en USD, donde los benchmarks bancarios sugieren
+~$50-500/customer/mes.
 
-Root cause: `total_revenue_monthly` summed `total_fees_paid` (lifetime
-cumulative) with `monthly_interest_income` (single month projection),
-mixing temporal scales. The fees component dominated by an order of
-magnitude proportional to `tenure_months`.
+**Root cause:** `total_revenue_monthly` sumaba `total_fees_paid` (cumulativo
+lifetime) con `monthly_interest_income` (proyección de un solo mes),
+mezclando escalas temporales. El componente de fees dominaba por un
+orden de magnitud proporcional a `tenure_months`.
 
-**Fix:** normalize fees to monthly average by dividing by tenure_months.
-The renamed `monthly_fee_revenue = total_fees_paid_lifetime / tenure_months`
-provides temporal consistency. The lifetime cumulative is preserved as
-`total_fees_paid_lifetime` for auditability.
+**Fix:** normalizar las fees a promedio mensual dividiendo por tenure_months.
+El renombrado `monthly_fee_revenue = total_fees_paid_lifetime / tenure_months`
+provee consistencia temporal. El cumulativo lifetime se preserva como
+`total_fees_paid_lifetime` para auditabilidad.
 
-**Lesson:** when summing metrics, verify all components share the same
-temporal grain. Add invariant tests on magnitude (e.g., revenue per
-customer in a sensible range) to catch this class of bug.
+**Lección:** al sumar métricas, verificar que todos los componentes
+comparten el mismo grain temporal. Agregar tests de invariantes sobre
+magnitud (ej. revenue por customer en un rango razonable) para catchear
+esta clase de bug.
 
-**Edge case handled:** ~0.9% of customers (45 of 5,000) have 
-`tenure_months = 0` (registered in the most recent load). For these, 
-`monthly_fee_revenue = NULLIF / 0` would yield NULL and exclude them 
-from segment averages. We use `COALESCE(..., 0)` to attribute zero 
-monthly revenue to these customers — conceptually correct (no time 
-to accumulate fees yet) and preserves the population count in aggregates.
+**Edge case manejado:** ~0,9% de customers (45 de 5.000) tienen
+`tenure_months = 0` (registrados en el load más reciente). Para estos,
+`monthly_fee_revenue = NULLIF / 0` daría NULL y los excluiría de los
+promedios por segment. Usamos `COALESCE(..., 0)` para atribuir cero
+revenue mensual a estos customers — conceptualmente correcto (no tienen
+tiempo acumulado de fees todavía) y preserva el conteo de población en
+agregados.
 
-### Data scope expansion: EUR added to FX seed
+### Expansión del scope de data: EUR agregado al seed FX
 
-When validating mart_tx_by_channel/category/dow against fx_rates via 
-relationships test, dbt flagged 924 transactions denominated in EUR 
-(~1.8% of total volume). The original seed scope was LATAM-only based 
-on the project brief, but the dataset legitimately includes EUR 
-transactions (likely expat or international clients).
+Al validar mart_tx_by_channel/category/dow contra fx_rates vía test de
+relationships, dbt flaggeó 924 transactions denominadas en EUR (~1,8% del
+volumen total). El scope original del seed era LATAM-only basado en la
+consigna del proyecto, pero el dataset legítimamente incluye transactions
+en EUR (probablemente clientes expat o internacionales).
 
-**Fix:** EUR added to fx_rates.csv at 1.16 USD (mid-market, May 2026, 
-source Xe.com). Seed `accepted_values` test updated accordingly.
+**Fix:** EUR agregado a fx_rates.csv en 1.16 USD (mid-market, mayo 2026,
+fuente Xe.com). Test `accepted_values` del seed actualizado en consecuencia.
 
-**Lesson:** the `relationships` test on currency was effective — it 
-surfaced a real data scope gap before reaching downstream marts.
+**Lección:** el test `relationships` sobre currency fue efectivo — surfaceó
+un gap real en el scope de data antes de llegar a los marts downstream.
 
 
-### Finding: synthetic data shows abnormal DPD distribution
+### Hallazgo: data sintética muestra distribución anormal de DPD
 
-mart_loan_dpd reveals that the source dataset has an unusual DPD profile:
-  - Exactly 50.5% of loans at DPD=0 ('Current')
-  - The remaining ~49.5% are distributed across delinquency buckets with
-    a slight skew toward shorter durations (avg DPD of the delinquent
-    subset ≈ 134 days, not exactly uniform).
+`mart_loan_dpd` revela que el dataset source tiene un perfil de DPD inusual:
+- Exactamente 50,5% de loans en DPD=0 ('Current')
+- El ~49,5% restante se distribuye entre buckets de delinquency con un
+  leve skew hacia duraciones más cortas (DPD promedio del subset
+  delinquent ≈ 134 días, no exactamente uniforme).
 
-In real LATAM banking, the expected pattern is:
-  - 70-85% Current
-  - Exponential decay across DPD buckets (most late payers cure quickly)
-  - <2% in 180+ DPD (charge-off threshold in most jurisdictions)
+En banca LATAM real, el patrón esperado es:
+- 70-85% Current
+- Decaimiento exponencial entre los buckets DPD (la mayoría de los
+  pagadores tardíos se curan rápido)
+- <2% en 180+ DPD (threshold de charge-off en la mayoría de jurisdicciones)
 
-Hypothesis: the data generator assigns DPD=0 to half the population
-(approximating performing loans) but samples the remainder from a 
-biased-uniform distribution rather than modeling true delinquency
-dynamics. This produces a portfolio that would be insolvent in reality
-(~16-18% in 180+ DPD across loan types).
+**Hipótesis:** el generador de data asigna DPD=0 a la mitad de la población
+(aproximando loans performing) pero samplea el resto desde una distribución
+biased-uniform en lugar de modelar dinámicas reales de delinquency. Esto
+produce un portfolio que sería insolvente en realidad (~16-18% en 180+
+DPD entre tipos de loan).
 
-**Decision:** keep the bucketing aligned with IFRS9/Basel convention
-(decisions.md §3). Document the divergence as a business-readable insight
-in Power BI (Page 3: Risk & Credit). The metrics are computed correctly;
-the unrealistic distribution is a property of the synthetic data source.
+**Decisión:** mantener el bucketing alineado con la convención IFRS9/Basel
+(decisions.md §3). Documentar la divergencia como un insight legible para
+negocio en Power BI (Página 3: Risk & Credit). Las métricas se computan
+correctamente; la distribución poco realista es una propiedad de la data
+source sintética.
 
-Pattern consistent with the revenue-by-segment flatness finding (Mart 1):
-the generator does not correlate financial dimensions (DPD, loan amount,
-revenue) with customer segments or loan types in realistic ways.
+Patrón consistente con el hallazgo de flatness en revenue-by-segment
+(Mart 1): el generador no correlaciona dimensiones financieras (DPD, monto
+de loan, revenue) con segmentos de customer o tipos de loan de formas
+realistas.
 
-### Finding: risk_score does not correlate with realized delinquency
+### Hallazgo: risk_score no correlaciona con delinquency observada
 
-The mart_risk_buckets output reveals a critical observation:
+El output de `mart_risk_buckets` revela una observación crítica:
 
 | risk_bucket | customer_count | delinquency_rate |
 |-------------|----------------|------------------|
-| low         | 1,495          | 65.3%            |
-| medium      | 1,539          | 63.2%            |
-| high        | 1,218          | 62.8%            |
-| critical    |   748          | 60.4%            |
+| low         | 1.495          | 65,3%            |
+| medium      | 1.539          | 63,2%            |
+| high        | 1.218          | 62,8%            |
+| critical    |   748          | 60,4%            |
 
-The relationship is non-monotonic and counterintuitive: customers
-classified as "low risk" show a HIGHER delinquency rate than those
-classified as "critical". In a calibrated risk model, the gradient
-should be the opposite and span tens of percentage points (e.g.,
-low: 2-5%, critical: 70%+).
+La relación es no-monotónica y contraintuitiva: customers clasificados
+como "low risk" muestran una tasa de delinquency MÁS ALTA que los
+clasificados como "critical". En un modelo de riesgo calibrado, el
+gradiente debería ser el opuesto y abarcar decenas de puntos porcentuales
+(ej. low: 2-5%, critical: 70%+).
 
-**Interpretation:** the synthetic dataset assigns `risk_score` 
-independently from the underlying customer financial behavior. This is
-a stronger finding than the previously documented flatness in revenue
-and utilization-delinquency: it directly refutes the predictive validity
-of the `risk_score` field.
+**Interpretación:** el dataset sintético asigna `risk_score` independientemente
+del comportamiento financiero subyacente del customer. Este es un hallazgo
+más fuerte que la flatness previamente documentada en revenue y la
+correlación utilization-delinquency: refuta directamente la validez
+predictiva del campo `risk_score`.
 
-Combined with the other Day 9 findings (flat revenue by segment, flat
-utilization-delinquency correlation, uniform DPD distribution, near-flat
-risk segmentation), the consistent pattern is: the source data generator
-samples financial-risk-related dimensions independently rather than
-modeling their natural correlations. This is a known limitation of
-synthetic generators that do not implement joint distributions.
+Combinado con los otros hallazgos del Día 9 (revenue plano por segment,
+correlación plana utilization-delinquency, distribución uniforme de DPD,
+segmentación de riesgo casi plana), el patrón consistente es: el generador
+de data source samplea las dimensiones relacionadas a riesgo financiero
+independientemente en lugar de modelar sus correlaciones naturales. Esta
+es una limitación conocida de generadores sintéticos que no implementan
+distribuciones conjuntas.
 
-**Decision:** report findings honestly in the Power BI Risk & Credit page
-with explicit narrative. The metrics are computed correctly; the data
-exhibits independence patterns that would not occur in production banking.
+**Decisión:** reportar los hallazgos honestamente en la página de Risk &
+Credit de Power BI con narrativa explícita. Las métricas se computan
+correctamente; la data exhibe patrones de independencia que no ocurrirían
+en banca de producción.
 
-This is a Day 9 insight worth highlighting in the project README as it
-demonstrates the value of validation: a less careful analyst would have
-delivered a "risk_score" dashboard without noticing it predicts nothing.
-
-
-### Finding: digital engagement metrics show no demographic gradient
-
-mart_digital_adoption_by_segment and mart_channel_preference_by_age 
-reveal that digital engagement metrics in the dataset are independent
-of customer demographics:
-
-**Q20 - Mobile adoption by segment:**
-  - retail:          47.6%
-  - premium:         49.2%
-  - private_banking: 49.8%
-  - sme:             49.9%
-  Spread: 2.3 percentage points.
-
-**Q21 - Channel preference by age:**
-  - For every age bucket (18-25, 26-35, 36-50, 51-65, 65+), the five
-    channels (mobile/web/atm/branch/phone) each capture ~20% of customers.
-  - Maximum spread within any age bucket is ~7 percentage points.
-
-In real-world banking, both metrics show strong gradients:
-  - Premium/private_banking customers (typically older, higher net worth)
-    show LOWER mobile adoption than retail.
-  - 18-25 year olds typically show 50%+ mobile preference; 65+ customers
-    show 50%+ branch/phone preference. The dataset shows ~20%/~20% for
-    all age groups across all channels.
-
-The synthetic data assigns digital engagement attributes uniformly,
-independent of segment or age. Combined with the other Day 9 findings
-(flat revenue by segment, flat utilization-delinquency, risk_score
-non-predictive of delinquency), this is the fifth consistent observation
-that the generator samples demographic and behavioral dimensions
-INDEPENDENTLY rather than modeling their natural correlations.
-
-This pattern is a known limitation of simple synthetic data generators
-that do not implement joint distributions.
-
-**Decision:** the marts are computed correctly. The findings are 
-reported honestly in the Power BI dashboard with explicit narrative,
-which demonstrates analytical rigor (the metrics are produced, validated,
-and contextualized, rather than presented uncritically).
+Este es un insight del Día 9 que vale destacar en el README del proyecto
+ya que demuestra el valor de la validación: un analista menos cuidadoso
+habría entregado un dashboard de "risk_score" sin notar que no predice
+nada.
 
 
-### Finding: international transfers DO show structured patterns
+### Hallazgo: las métricas de digital engagement no muestran gradiente demográfico
 
-Contrary to the other Day 9 findings (revenue, DPD, utilization-delinquency,
-risk_score, channel preference — all uniformly distributed), the 
-international transfer mart reveals genuine structure in the data:
+`mart_digital_adoption_by_segment` y `mart_channel_preference_by_age`
+revelan que las métricas de digital engagement en el dataset son
+independientes de la demografía del customer:
 
-**Bimodal distribution of transfer corridors:**
-  - Large corridors (~900 tx each): domestic transfers in local currency
-    or in USD where account currency matches.
-    Examples: AR-ARS (956 tx, 0% intl), CO-USD (940 tx, 1.3% intl).
-  - Small corridors (~30 tx each): rare exotic transfers, 100% intl.
-    Examples: PE-EUR, MX-UYU, CL-MXN.
+**Q20 — Adopción mobile por segment:**
+- retail: 47,6%
+- premium: 49,2%
+- private_banking: 49,8%
+- sme: 49,9%
 
-**International share by country (rolled up):**
-  - PE: 9.2%, MX: 9.0%, AR: 8.3%, CO: 8.2%, CL: 7.9%, BR: 7.8%, UY: 7.8%
-  - Relatively consistent across LATAM countries (7.8-9.2% spread).
+Spread: 2,3 puntos porcentuales.
 
-**Value asymmetry by country:**
-  - UY shows the highest international transfer VALUE per country
-    ($131,717 USD with only 9 transactions; ~$14,600 average ticket).
-  - Other LATAM countries: $30k-$70k total, $4-5k average ticket.
+**Q21 — Preferencia de canal por edad:**
+- Para cada age bucket (18-25, 26-35, 36-50, 51-65, 65+), los cinco
+  canales (mobile/web/atm/branch/phone) capturan cada uno ~20% de los
+  customers.
+- Máximo spread dentro de cualquier age bucket es ~7 puntos porcentuales.
 
-**Interpretation:**
-  - The data generator implemented some geographic intent for transfers
-    (most are domestic in local currency).
-  - Uruguay's high-value/low-count international corridor is consistent
-    with its real-world role as a regional financial hub.
-  - The strict definition of international (decisions.md Day 9 §8 -
-    requires tx_currency to differ from BOTH account_currency AND
-    customer_country_currency) is critical: a more permissive definition
-    would have classified all USD transactions from non-USD countries as
-    international, hiding the real signal.
+En banca del mundo real, ambas métricas muestran gradientes fuertes:
+- Customers premium/private_banking (típicamente más viejos, mayor net
+  worth) muestran MENOR adopción mobile que retail.
+- Customers de 18-25 típicamente muestran 50%+ preferencia mobile;
+  customers 65+ muestran 50%+ preferencia branch/phone. El dataset
+  muestra ~20%/~20% para todos los grupos de edad en todos los canales.
 
-This is the first Day 9 mart where the synthetic data shows realistic
-structure. It is reportable as a positive finding in the dashboard.
+La data sintética asigna los atributos de digital engagement uniformemente,
+independiente de segment o edad. Combinado con los otros hallazgos del
+Día 9 (revenue plano por segment, utilization-delinquency plana, risk_score
+no predictivo de delinquency), esta es la quinta observación consistente
+de que el generador samplea las dimensiones demográficas y conductuales
+INDEPENDIENTEMENTE en lugar de modelar sus correlaciones naturales.
 
-## Refactor: int_customer_monthly_revenue 
+Este patrón es una limitación conocida de generadores sintéticos simples
+que no implementan distribuciones conjuntas.
 
-Day 10's afternoon block extracted the customer-grain revenue computation
-into an intermediate model (`int_customer_monthly_revenue`) consumed by
-both `mart_customer_360` and `mart_revenue_by_segment_usd`. Before the
-refactor, the same logic lived (duplicated) in both marts with two cosmetic
-differences:
+**Decisión:** los marts se computan correctamente. Los hallazgos se
+reportan honestamente en el dashboard de Power BI con narrativa explícita,
+lo cual demuestra rigor analítico (las métricas se producen, validan, y
+contextualizan, en lugar de presentarse acríticamente).
 
-1. `mart_revenue_by_segment_usd` did not round per-customer values; rounding
-   happened only at the segment-level rollup.
-2. `mart_customer_360` rounded per-customer (it is a display mart) and used
-   a longer JOIN path for fee attribution (`fct_transactions → dim_account
-   → customer_id`) where the other mart used `fct_transactions.customer_id`
-   directly.
 
-Both differences were verified to produce **identical customer-level
-revenue values** in the current dataset (see `scripts/diagnose_fee_attribution.sql`
-and `scripts/diagnose_revenue_mismatch.sql`). The refactor preserves
-exact semantics: 0 / 5000 customers diverge on fee, interest, or total
-revenue between the pre-refactor SQL and the intermediate.
+### Hallazgo: las transferencias internacionales SÍ muestran patrones estructurados
 
-### Precision policy adopted
+Contrario a los otros hallazgos del Día 9 (revenue, DPD, utilization-delinquency,
+risk_score, preferencia de canal — todos uniformemente distribuidos), el
+mart de transferencia internacional revela estructura genuina en la data:
 
-When an intermediate model serves multiple consumers with different
-aggregation patterns, precision must be set per-column, not globally:
+**Distribución bimodal de corredores de transferencia:**
+- Corredores grandes (~900 tx cada uno): transferencias domésticas en
+  currency local o en USD donde el currency de la cuenta coincide.
+  Ejemplos: AR-ARS (956 tx, 0% intl), CO-USD (940 tx, 1,3% intl).
+- Corredores chicos (~30 tx cada uno): transferencias exóticas raras,
+  100% intl. Ejemplos: PE-EUR, MX-UYU, CL-MXN.
 
-- **Native-currency columns** are rounded to 2 decimals at customer grain.
-  They are consumed by `mart_customer_360` (display, no further aggregation
-  inside the mart).
-- **USD columns** are NOT rounded at customer grain. They are consumed by
-  `mart_revenue_by_segment_usd` via `AVG(...)` over ~1,200 customers per
-  segment. Rounding before AVG would introduce small per-segment deltas
-  (cents propagating to dollars across hundreds of customers).
+**Share internacional por país (rolled up):**
+- PE: 9,2%, MX: 9,0%, AR: 8,3%, CO: 8,2%, CL: 7,9%, BR: 7,8%, UY: 7,8%
+- Relativamente consistente entre países LATAM (spread 7,8-9,2%).
 
-**Lesson:** rounding at the wrong grain is a silent semantic change — no
-test fails, but aggregate snapshots drift. Bug only surfaces at numeric
-reconciliation time.
+**Asimetría de valor por país:**
+- UY muestra el VALOR de transferencia internacional más alto por país
+  ($131.717 USD con solo 9 transacciones; ~$14.600 ticket promedio).
+- Otros países LATAM: $30k-$70k totales, $4-5k ticket promedio.
 
-### What got centralized
+**Interpretación:**
+- El generador de data implementó algo de intención geográfica para
+  transferencias (la mayoría son domésticas en currency local).
+- El corredor de Uruguay de alto-valor/bajo-conteo es consistente con su
+  rol real como hub financiero regional.
+- La definición estricta de internacional (decisions.md Día 9 §8 — requiere
+  que tx_currency difiera de AMBOS account_currency Y
+  customer_country_currency) es crítica: una definición más permisiva
+  habría clasificado todas las transactions USD desde países no-USD como
+  internacionales, ocultando la señal real.
 
-| Logic | Pre-refactor location | Post-refactor location |
-|-------|----------------------|------------------------|
-| Fee revenue per customer (native + USD) | Duplicated in both marts | `int_customer_monthly_revenue` |
-| Interest revenue per customer (native + USD) | Duplicated in both marts | `int_customer_monthly_revenue` |
-| `fees / tenure_months` normalization | Duplicated, with NULLIF + COALESCE | `int_customer_monthly_revenue` |
-| Zero-tenure handling (COALESCE to 0) | Duplicated | `int_customer_monthly_revenue` |
-| Active-loan status filter (current, delinquent) | Duplicated | `int_customer_monthly_revenue` |
+Este es el primer mart del Día 9 donde la data sintética muestra
+estructura realista. Es reportable como hallazgo positivo en el dashboard.
 
-`mart_customer_360` and `mart_revenue_by_segment_usd` now only do their
-own aggregation logic on top of the intermediate.
+## Intermediate models en silver (estado pre-Día 10)
+
+Antes del Día 10 ya existían dos intermediate models en
+`dbt/models/intermediate/`:
+
+- `int_loan_portfolio_metrics` — consumed by `mart_loan_composition`,
+  `mart_loan_dpd`. Centraliza derivaciones a nivel loan (`is_delinquent`,
+  `is_default`, `monthly_interest_accrued`, dpd_bucket).
+- `int_customer_risk_profile` — consumed by `mart_risk_buckets`,
+  `mart_utilization_vs_delinquency`, `mart_delinquency_by_segment`.
+  Centraliza derivaciones de risk a nivel customer (risk_bucket
+  computado, observed_delinquency_flag, utilization_bucket lookup).
+
+Día 10 agregó el tercero (`int_customer_monthly_revenue`) siguiendo el
+mismo patrón — extraer la duplicación entre marts que comparten un grano
+y una lógica de derivación. Ver sección "Refactor: int_customer_monthly_revenue"
+para los detalles.
+
+**Criterio general:** un `int_*` model se justifica cuando la misma lógica
+no-trivial aparece en 2+ marts. Si solo lo usa un mart, vive como CTE
+dentro del mart. Si lo usan 2+, sube a intermediate.
 
 ---
 
-## Lesson: snapshot staleness vs SQL equivalence (Day 10)
+## Refactor: int_customer_monthly_revenue 
 
-When validating the refactor, the morning snapshot in
+El bloque de la tarde del Día 10 extrajo el cómputo de revenue a nivel
+customer grain hacia un modelo intermediate (`int_customer_monthly_revenue`)
+consumido por ambos `mart_customer_360` y `mart_revenue_by_segment_usd`.
+Antes del refactor, la misma lógica vivía (duplicada) en ambos marts con
+dos diferencias cosméticas:
+
+1. `mart_revenue_by_segment_usd` no redondeaba los valores por-customer; el
+   redondeo solo sucedía en el rollup a nivel segment.
+2. `mart_customer_360` redondeaba por-customer (es un mart de display) y
+   usaba un path de JOIN más largo para atribución de fees
+   (`fct_transactions → dim_account → customer_id`) donde el otro mart
+   usaba `fct_transactions.customer_id` directamente.
+
+Ambas diferencias se verificó que producen **valores de revenue a nivel
+customer idénticos** en el dataset actual (ver `scripts/diagnose_fee_attribution.sql`
+y `scripts/diagnose_revenue_mismatch.sql`). El refactor preserva semánticas
+exactas: 0 / 5000 customers divergen en fee, interest, o total revenue
+entre el SQL pre-refactor y el intermediate.
+
+### Política de precisión adoptada
+
+Cuando un modelo intermediate sirve a múltiples consumidores con patrones
+de agregación diferentes, la precisión debe setearse por-columna, no
+globalmente:
+
+- **Columnas en moneda nativa** se redondean a 2 decimales a nivel
+  customer grain. Son consumidas por `mart_customer_360` (display, sin
+  agregación adicional adentro del mart).
+- **Columnas en USD NO se redondean** a nivel customer grain. Son
+  consumidas por `mart_revenue_by_segment_usd` vía `AVG(...)` sobre ~1.200
+  customers por segment. Redondear antes del AVG introduciría pequeños
+  deltas por segment (centavos propagándose a dólares a lo largo de
+  cientos de customers).
+
+**Lección:** redondear en el grain equivocado es un cambio semántico
+silencioso — ningún test falla, pero los snapshots agregados drift-ean.
+El bug solo surfacea al reconciliar numéricamente.
+
+### Qué se centralizó
+
+| Lógica | Ubicación pre-refactor | Ubicación post-refactor |
+|--------|------------------------|-------------------------|
+| Fee revenue por customer (native + USD) | Duplicado en ambos marts | `int_customer_monthly_revenue` |
+| Interest revenue por customer (native + USD) | Duplicado en ambos marts | `int_customer_monthly_revenue` |
+| Normalización `fees / tenure_months` | Duplicado, con NULLIF + COALESCE | `int_customer_monthly_revenue` |
+| Manejo de zero-tenure (COALESCE a 0) | Duplicado | `int_customer_monthly_revenue` |
+| Filtro de status de loans activos (current, delinquent) | Duplicado | `int_customer_monthly_revenue` |
+
+`mart_customer_360` y `mart_revenue_by_segment_usd` ahora solo hacen su
+propia lógica de agregación sobre el intermediate.
+
+---
+
+## Coverage map: business_questions.md (Día 10)
+
+El documento `docs/business_questions.md` mapea cada una de las 24 preguntas
+de la consigna a su query SQL contra el Gold layer, con muestra de resultado
+real y bloque de "Key Findings" al final que destaca cuatro insights del
+dataset:
+
+1. **`risk_score` es anti-predictivo de delinquency** (low: 65,3%, critical:
+   60,4% — no-monotónico, invertido).
+2. **Patrón estructural de dolarización USD** (~50% en todos los países LATAM).
+3. **Flatness en dimensiones financieras** (revenue/delinquency/failed_rate/
+   digital_adoption casi uniformes — propiedad del generador sintético, no
+   bug del pipeline).
+4. **Honestidad de DQ:** el pipeline expone `accounts_with_balance` (Q2),
+   bucket `unknown` (Q6) y test `accepted_values` en Q13, en vez de
+   esconder problemas.
+
+**Cobertura final:** 24/24 (23 ✅ + 1 ⚠️ Q13 con divergencia spec-dataset
+documentada — el dataset usa `active/frozen/closed` a nivel account
+mientras la spec dice `active/inactive/suspended/closed`).
+
+Backed por `scripts/validate_business_questions.sql` y
+`scripts/validation_output.txt` (snapshot reproducible — ver lección sobre
+staleness más abajo).
+
+---
+
+## Lección: snapshot staleness vs equivalencia SQL (Día 10)
+
+Al validar el refactor, el snapshot de la mañana en
 `scripts/validation_output.txt` (sme 2890.38, premium 2676.87, retail 2635.99,
-private_banking 2482.45) did not match the post-refactor output (sme 2897.17,
+private_banking 2482.45) no matcheaba con el output post-refactor (sme 2897.17,
 premium 2666.19, retail 2583.02, private_banking 2534.46).
 
-The instinct was to assume the refactor changed semantics. It did not.
-Two diagnostic queries ruled out semantic divergence:
+El instinto fue asumir que el refactor había cambiado semánticas. **No lo
+hizo.** Dos queries diagnósticas descartaron divergencia semántica:
 
-1. `diagnose_fee_attribution.sql`: 0 of 3613 completed fees have
-   `t.customer_id != a.customer_id` (ruling out fee attribution drift).
-2. `diagnose_revenue_mismatch.sql`: re-implemented the pre-refactor mart
-   logic inline and compared per-customer against the intermediate;
-   0 of 5000 customers diverged on fee, interest, or total.
+1. `diagnose_fee_attribution.sql`: 0 de 3.613 fees `completed` tienen
+   `t.customer_id != a.customer_id` (descartando drift de atribución de fees).
+2. `diagnose_revenue_mismatch.sql`: re-implementó la lógica pre-refactor del
+   mart inline y comparó customer por customer contra el intermediate;
+   0 de 5.000 customers divergen en fee, interest, o total.
 
-The snapshot in `validation_output.txt` had become stale between the
-morning run (when the snapshot was captured) and the afternoon refactor
-validation. Some upstream dependency — a Silver re-run, a Bronze re-load,
-or a seed change — produced new underlying data without re-generating
-the snapshot.
+El snapshot en `validation_output.txt` se había vuelto stale entre la
+corrida de la mañana (cuando se capturó el snapshot) y la validación del
+refactor de la tarde. Alguna dependencia upstream — una re-corrida de
+Silver, un re-load de Bronze, o un cambio de seed — produjo data
+subyacente nueva sin re-generar el snapshot.
 
-**Procedural improvements adopted:**
+**Mejoras procedurales adoptadas:**
 
-- **The acid test for refactor equivalence is SQL-level comparison, not
-  snapshot comparison.** Re-implementing the pre-refactor logic inline
-  and comparing row-by-row against the new intermediate is dispositive
-  in a way snapshot comparisons are not.
-- **Validation snapshots should be regenerated whenever upstream
-  dependencies change**, or treated as approximate references rather than
-  exact contracts. The `business_questions.md` sample-result tables for
-  Q1/Q5/Q9 need a refresh now that the underlying data has shifted.
-- **The validation runbook should include a snapshot-generation step**
-  immediately before any refactor work begins, so the snapshot reflects
-  the pre-refactor state of the actual repo, not a state from earlier
-  in the day.
-
+- **El acid test para equivalencia de refactor es comparación a nivel SQL,
+  no comparación de snapshots.** Re-implementar la lógica pre-refactor
+  inline y comparar row-by-row contra el nuevo intermediate es dispositivo
+  de una forma en que las comparaciones de snapshot no lo son.
+- **Los snapshots de validación deben regenerarse cuando cambien las
+  dependencias upstream**, o tratarse como referencias aproximadas en lugar
+  de contratos exactos. Las tablas sample-result de `business_questions.md`
+  para Q1 se refrescaron al final del Día 10; los outputs de Q5 y Q9 se
+  verificaron sin cambios entre snapshots (no requirieron refresh).
+- **El runbook de validación debería incluir un paso de snapshot-generation**
+  inmediatamente antes de empezar cualquier trabajo de refactor, así el
+  snapshot refleja el estado pre-refactor del repo real, no un estado de
+  más temprano en el día.

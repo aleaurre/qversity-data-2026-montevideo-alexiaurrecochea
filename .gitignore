@@ -56,3 +56,7 @@ derby.log
 
 # Java
 *.class
+
+# Validation outputs are regenerated on each pipeline run; the snapshot
+# committed alongside docs/business_questions.md is the canonical one.
+scripts/validation_output*.txt

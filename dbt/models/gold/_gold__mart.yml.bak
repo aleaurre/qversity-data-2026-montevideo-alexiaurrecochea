@@ -139,7 +139,7 @@ models:
               expression: ">= 0"
 
       - name: tenure_bucket
-        description: "Bucketed tenure band: new (<6m), established (6-24m), loyal (>24m), or unknown."
+        description: "Bucketed tenure band: new (<12m), established (12-36m), loyal (>36m), or unknown."
         tests:
           - not_null
           - accepted_values:
