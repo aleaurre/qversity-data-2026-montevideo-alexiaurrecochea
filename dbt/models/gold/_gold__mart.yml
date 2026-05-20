@@ -257,12 +257,30 @@ models:
           - dbt_utils.expression_is_true:
               expression: ">= 0"
 
+      # ============================================================================
+# Day 11 patch: replace the existing `- name: total_revenue_monthly` entry
+# inside `mart_customer_360.columns:` with this expanded block.
+# All other column entries in the file remain unchanged.
+# ============================================================================
+
       - name: total_revenue_monthly
-        description: "monthly_fee_revenue + monthly_interest_income."
+        description: |
+          monthly_fee_revenue + monthly_interest_income, both in source
+          customer currency (no FX conversion at this layer).
+          Day 9: temporal-consistency fix (lifetime fees normalized to monthly).
+          Day 11: fee component uses GREATEST(tenure_months, 3) to prevent
+          division-by-near-zero blowups for short-tenure customers.
+          Residual outliers may persist from extreme outstanding_balance
+          values in silver.fct_loans (~452 loans > $100M); see warn test
+          on silver.fct_loans.outstanding_balance.
         tests:
           - not_null
           - dbt_utils.expression_is_true:
               expression: ">= 0"
+          - dbt_utils.expression_is_true:
+              expression: "< 1000000"
+              config:
+                severity: warn
 
     tests:
       - dbt_utils.expression_is_true:

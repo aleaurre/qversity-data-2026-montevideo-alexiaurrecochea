@@ -89,6 +89,22 @@ models:
       interest_rate) viven acá; descriptores como loan_type se replican para
       facilitar agregaciones directas sobre el fact sin join obligatorio a dim_loan.
     columns:
+      - name: outstanding_balance
+        description: |
+          Outstanding loan balance in source currency. Synthetic dataset
+          contains extreme outliers (~452 loans with balance > $100M,
+          including 1 loan at $1.84B in COP). These are absurd for the
+          implied retail/SME segment but mathematically valid downstream:
+          they propagate into monthly_interest_income via the standard
+          formula (balance * rate / 12). Test set to `warn` severity to
+          make the issue visible on every `dbt test` run without blocking
+          the pipeline. See decisions.md Day 11.
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "< 100000000 or outstanding_balance is null"
+              config:
+                severity: warn
+
       - name: loan_id
         description: PK del loan.
         tests:
