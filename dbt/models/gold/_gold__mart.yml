@@ -996,3 +996,89 @@ models:
           - not_null
           - dbt_utils.expression_is_true:
               expression: "between 0 and 1"
+
+  # -------------------------------------------------------------------------
+
+  - name: mart_top_merchants
+    description: |
+      Top merchants by transaction volume and value, with grain
+      (merchant × currency). Answers Q22. Only completed
+      transactions are counted. Rankings are within-currency to
+      avoid mixing scales across LATAM currencies. Includes
+      top_category enrichment for qualitative context.
+    columns:
+      - name: merchant
+        description: Merchant identifier from completed transactions in silver.fct_transactions.
+        tests:
+          - not_null
+      - name: currency
+        description: Source transaction currency (no FX applied).
+        tests:
+          - not_null
+      - name: top_category
+        description: |
+          Most frequent transaction category for this merchant × currency
+          combination. Tiebroken alphabetically for deterministic results.
+      - name: tx_count
+        description: Number of completed transactions for this merchant × currency.
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: total_value
+        description: Sum of completed transaction amounts in source currency.
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: avg_ticket
+        description: Average transaction amount in source currency.
+        tests:
+          - not_null
+      - name: rank_by_value_within_currency
+        description: Rank by total_value, partitioned by currency. Rank=1 is top merchant in that currency.
+        tests:
+          - not_null
+
+# ============================================================================
+
+  - name: mart_revenue_monthly_by_segment_usd
+    description: |
+      Monthly revenue (fee + interest) per customer_segment, in USD.
+      Grain: (revenue_month × customer_segment). Powers the time-series
+      line chart on the Revenue & Transactions dashboard page.
+      Current calendar month is excluded to avoid partial-month bias.
+      Interest accrual uses simplified flat-monthly allocation due to
+      absence of a loan_schedule table in source data. See decisions.md
+      Day 11.
+    columns:
+      - name: revenue_month
+        description: First day of the calendar month. Strictly before current month.
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "< date_trunc('month', current_date)::date"
+      - name: customer_segment
+        description: retail / sme / premium / private_banking
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['retail', 'sme', 'premium', 'private_banking']
+      - name: fee_revenue_usd
+        description: Sum of completed fee transactions in this month for this segment, converted to USD.
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: interest_revenue_usd
+        description: Allocated monthly interest accrual for active loans of customers in this segment, converted to USD.
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: total_revenue_usd
+        description: fee_revenue_usd + interest_revenue_usd, all in USD.
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
