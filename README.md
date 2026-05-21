@@ -726,6 +726,8 @@ git checkout v0.3.0-gold
 - **EDA notebook:** [`notebooks/01_eda.ipynb`](notebooks/01_eda.ipynb) —
   the Day 1 exploration that surfaced the patterns driving the cleaning
   and normalization layers.
+- **Decision log on PowerBI dashboards: [`powerbi/decisions.md`](powerbi/decisions.md) —
+  detailed design decisions, palette rationale, and per-visual notes.
 
 ---
 
