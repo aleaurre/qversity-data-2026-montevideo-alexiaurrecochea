@@ -1,0 +1,2 @@
+*.pbix binary
+*.pbix diff=binary
