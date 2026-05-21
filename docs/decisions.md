@@ -1844,3 +1844,62 @@ Conclusion: the Day 11 formula fix is complete. Residual outliers are
 **source data, not pipeline behavior**. The median (not mean) is therefore
 the statistically correct KPI for the dashboard, and the warn tests
 serve as ongoing evidence of the source-data limitations.
+
+### New marts created during dashboard integration
+
+PowerBI maquetación de Página 2 surfaced two gaps in the existing 
+Gold layer:
+
+**Gap 1 — Top merchants ranking (Q22):**
+`mart_top_merchants` was added with grain (merchant × currency).
+Aggregates only completed transactions, ranks within currency to
+avoid mixing scales across LATAM currencies. Includes a `top_category`
+enrichment column computed via window function with deterministic
+tiebreaker (alphabetical), so each merchant row carries the most
+frequent category as qualitative context. The dashboard's top-10
+merchants table filters by `rank_by_value_within_currency <= 10` and
+binds to the global currency slicer.
+
+The column was named `merchant` (not `merchant_name` as originally
+assumed) — first attempt failed at `dbt run` with "column does not 
+exist", verified via `information_schema.columns`, patched in one
+iteration.
+
+**Gap 2 — Monthly revenue time series (Q2):**
+`mart_revenue_by_segment_usd` is snapshot-grained (1 row per segment)
+and cannot drive a time-series line chart. `mart_revenue_monthly_by_segment_usd`
+was added with grain (revenue_month × customer_segment) to power
+the dashboard's main line chart.
+
+Two design decisions in this mart:
+
+1. **Current-month cutoff:** the current calendar month is excluded
+   via `WHERE transaction_date < date_trunc('month', current_date)`.
+   Otherwise a partial-current-month would render as a sharp drop
+   at the right edge of the line chart, misleading viewers into
+   reading it as a trend reversal.
+
+2. **Interest accrual simplification:** `silver.fct_loans` has no
+   loan_schedule table — only a snapshot `outstanding_balance` and
+   `start_date`. Monthly interest is allocated as a flat monthly
+   accrual (balance × rate / 12) attributed identically to every
+   month from `start_date` forward, capped at the cutoff.
+
+   Implications:
+   - Older months may be slightly overstated (loans that closed
+     historically still appear "current" with no closure date in source)
+   - Interest revenue grows roughly linearly while fee revenue grows
+     exponentially in the data — this is consistent with the source
+     and produces a meaningful fee/interest ratio shift over time
+     (jun 2025: 27/73; apr 2026: 65/35), interpretable as a transition
+     from balance-sheet-revenue-dominant to transaction-revenue-dominant.
+
+   In production, a `loan_schedule` table would replace this
+   simplification. Documented as a known limitation.
+
+**Time range observed in source:** Sept 2020 → May 2026. After cutoff:
+Sept 2020 → April 2026 (61 months × 4 segments = 244 rows).
+
+Both marts received standard schema tests (not_null on grain keys,
+expression_is_true `>= 0` on monetary columns, accepted_values where
+applicable).
