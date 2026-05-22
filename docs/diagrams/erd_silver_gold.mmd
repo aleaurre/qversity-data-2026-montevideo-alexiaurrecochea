@@ -1,0 +1,434 @@
+%% =============================================================================
+%% Qversity ELT - Entity Relationship Diagram (Silver + Gold)
+%% =============================================================================
+%% Modelos representados (34 entidades en total):
+%%
+%% Silver (16 modelos dbt):
+%%   - 3 staging views (stg_*)         -- vistas sobre silver_raw.* de Spark
+%%   - 7 dimensions   (dim_*)
+%%   - 2 facts        (fct_*)
+%%   - 1 aggregate    (agg_*)
+%%   - 3 intermediates (int_*)          -- lógica de negocio compartida
+%%
+%% Gold (18 marts analíticos):
+%%   - 18 mart_* tables
+%%
+%% NO se representan:
+%%   - bronze.raw_fintech_data (raw JSONB, sin estructura dimensional)
+%%   - silver_raw.* (output crudo de Spark; expuestos vía stg_* en silver)
+%%
+%% Convenciones:
+%%   PK = Primary Key, FK = Foreign Key (testeada con `relationships` en dbt)
+%%   ||--o{  relación 1:N (dim → fact típicamente)
+%%   ||--||  relación 1:1 (customer ↔ enriquecimientos)
+%%   o|--o{  cardinalidad opcional (LEFT JOIN typical)
+%% =============================================================================
+
+erDiagram
+
+    %% =========================================================================
+    %% SILVER STAGING — Spark outputs cleaned and normalized via dbt views
+    %% =========================================================================
+
+    stg_accounts {
+        string  account_id PK
+        string  customer_id FK
+        string  account_type
+        string  currency
+        string  status
+        numeric balance
+        numeric credit_limit
+        numeric interest_rate
+        date    opened_date
+        string  branch_code
+    }
+
+    stg_transactions {
+        string  transaction_id PK
+        string  customer_id FK
+        string  account_id FK
+        date    transaction_date
+        numeric amount
+        string  currency
+        string  transaction_type
+        string  category
+        string  merchant
+        string  channel
+        string  status
+    }
+
+    stg_loans {
+        string  loan_id PK
+        string  customer_id FK
+        string  loan_type
+        string  currency
+        numeric principal
+        numeric outstanding_balance
+        numeric interest_rate
+        int     term_months
+        date    start_date
+        date    end_date
+        string  status
+        int     days_past_due
+        string  collateral_type
+    }
+
+    %% =========================================================================
+    %% SILVER DIMENSIONS
+    %% =========================================================================
+
+    dim_customer {
+        string  customer_id PK
+        string  first_name
+        string  last_name
+        string  email
+        date    date_of_birth
+        int     age
+        string  age_bucket
+        string  gender
+        string  city
+        string  country
+        boolean is_geo_valid
+        float   lat
+        float   lon
+        date    registration_date
+        int     tenure_months
+        string  tenure_bucket
+        string  kyc_status
+        numeric risk_score
+        string  customer_segment
+        string  status
+    }
+
+    dim_account {
+        string  account_id PK
+        string  customer_id FK
+        string  account_type
+        string  currency
+        numeric balance
+        numeric credit_limit
+        date    opened_date
+        int     account_age_months
+        string  status
+    }
+
+    dim_loan {
+        string  loan_id PK
+        string  loan_type
+        string  currency
+        int     term_months
+        string  collateral_type
+    }
+
+    dim_credit_info {
+        string  customer_id PK
+        numeric credit_score
+        boolean is_credit_score_valid
+        numeric utilization_pct
+        boolean is_utilization_pct_valid
+        numeric total_limit
+        numeric total_used
+        int     late_payments_12m
+        int     inquiries_6m
+        boolean bankruptcy_flag
+    }
+
+    dim_digital_engagement {
+        string  customer_id PK
+        boolean mobile_app_registered
+        boolean web_banking_registered
+        date    last_login_date
+        int     avg_monthly_logins
+        string  preferred_channel
+    }
+
+    dim_geography {
+        string  country_code PK
+        string  country_name
+        string  region
+        string  default_currency
+    }
+
+    dim_date {
+        date    date_day PK
+        int     year
+        int     quarter
+        int     month
+        int     day_of_week_num
+        boolean is_weekend
+        int     year_month_key
+    }
+
+    %% =========================================================================
+    %% SILVER FACTS
+    %% =========================================================================
+
+    fct_transactions {
+        string  transaction_id PK
+        string  customer_id FK
+        string  account_id FK
+        date    transaction_date
+        numeric amount
+        string  currency
+        string  transaction_type
+        string  category
+        string  merchant
+        string  channel
+        string  status
+        boolean is_failed
+        int     day_of_week
+    }
+
+    fct_loans {
+        string  loan_id PK
+        string  customer_id FK
+        string  loan_type
+        string  currency
+        numeric principal
+        numeric outstanding_balance
+        numeric interest_rate
+        numeric interest_rate_decimal
+        int     term_months
+        date    start_date
+        date    end_date
+        string  status
+        int     days_past_due
+    }
+
+    %% =========================================================================
+    %% SILVER AGGREGATE
+    %% =========================================================================
+
+    agg_customer_activity {
+        string  customer_id PK
+        int     accounts_count
+        int     transactions_count
+        int     loans_count
+        int     total_products
+    }
+
+    %% =========================================================================
+    %% INTERMEDIATE — shared business logic, materialized as views in silver
+    %% =========================================================================
+
+    int_loan_portfolio_metrics {
+        string  loan_id PK
+        boolean is_delinquent
+        boolean is_default
+        string  dpd_bucket
+        numeric monthly_interest_accrued
+    }
+
+    int_customer_risk_profile {
+        string  customer_id PK
+        string  risk_bucket
+        string  credit_score_bucket
+        string  utilization_bucket
+        boolean is_delinquent_customer
+        boolean is_default_customer
+        int     loans_count
+    }
+
+    int_customer_monthly_revenue {
+        string  customer_id PK
+        numeric monthly_fee_revenue_native
+        numeric monthly_fee_revenue_usd
+        numeric monthly_interest_revenue_native
+        numeric monthly_interest_revenue_usd
+        numeric total_monthly_revenue_native
+        numeric total_monthly_revenue_usd
+    }
+
+    %% =========================================================================
+    %% GOLD MARTS (18) — one or more business questions each
+    %% =========================================================================
+
+    mart_customer_360 {
+        string  customer_id PK
+        string  country
+        string  customer_segment
+        string  status
+        string  kyc_status
+        string  age_bucket
+        string  tenure_bucket
+        string  risk_bucket
+        numeric credit_score
+        string  credit_score_bucket
+        numeric utilization_pct
+        string  utilization_bucket
+        int     accounts_count
+        int     loans_count
+        int     total_products
+        numeric monthly_fee_revenue
+        numeric monthly_interest_income
+        numeric total_revenue_monthly
+    }
+
+    mart_acquisition_trend {
+        date    month PK
+        string  month_label
+        int     new_customers
+        int     cumulative_customers
+        numeric mom_growth_pct
+    }
+
+    mart_revenue_by_segment_usd {
+        string  customer_segment PK
+        int     customer_count
+        numeric total_revenue_usd
+        numeric avg_revenue_per_customer_usd
+        numeric total_fee_revenue_usd
+        numeric total_interest_revenue_usd
+        numeric fee_revenue_share
+    }
+
+    mart_revenue_monthly_by_segment_usd {
+        date    revenue_month PK
+        string  customer_segment PK
+        numeric fee_revenue_usd
+        numeric interest_revenue_usd
+        numeric total_revenue_usd
+    }
+
+    mart_account_mix {
+        string  country PK
+        string  account_type PK
+        string  currency PK
+        int     accounts_count
+        int     accounts_with_balance
+        numeric total_balance
+        numeric avg_balance
+    }
+
+    mart_delinquency_by_segment {
+        string  customer_segment PK
+        int     customer_count
+        int     delinquent_customers
+        numeric delinquency_rate
+    }
+
+    mart_credit_score_by_country {
+        string  country PK
+        string  credit_score_bucket PK
+        int     customer_count
+        numeric bucket_share
+    }
+
+    mart_utilization_vs_delinquency {
+        string  utilization_bucket PK
+        int     customer_count
+        numeric delinquency_rate
+        numeric avg_credit_score
+    }
+
+    mart_risk_buckets {
+        string  risk_bucket PK
+        int     customer_count
+        numeric delinquency_rate
+        numeric default_rate
+    }
+
+    mart_loan_dpd {
+        string  loan_type PK
+        string  dpd_bucket PK
+        string  currency PK
+        int     loan_count
+        numeric outstanding_balance
+        numeric avg_dpd
+        numeric bucket_share
+    }
+
+    mart_loan_composition {
+        string  loan_type PK
+        string  status PK
+        string  currency PK
+        int     loan_count
+        numeric outstanding_balance
+        numeric monthly_interest_total
+    }
+
+    mart_tx_by_channel {
+        string  channel PK
+        string  currency PK
+        int     tx_count
+        numeric total_value
+        numeric avg_ticket
+        numeric failed_rate
+    }
+
+    mart_tx_by_category {
+        string  category PK
+        string  currency PK
+        int     tx_count
+        numeric total_value
+        numeric avg_ticket
+    }
+
+    mart_tx_by_dow {
+        int     day_of_week PK
+        string  currency PK
+        int     tx_count
+        numeric total_value
+    }
+
+    mart_international_transfers {
+        string  origin_country PK
+        string  tx_currency PK
+        int     tx_count
+        numeric total_value
+        numeric intl_share
+    }
+
+    mart_digital_adoption_by_segment {
+        string  customer_segment PK
+        int     customer_count
+        numeric mobile_adoption_rate
+        numeric web_adoption_rate
+        numeric any_digital_adoption_rate
+    }
+
+    mart_channel_preference_by_age {
+        string  age_bucket PK
+        string  preferred_channel PK
+        int     customer_count
+        numeric bucket_share
+    }
+
+    mart_top_merchants {
+        string  merchant PK
+        string  currency PK
+        string  top_category
+        int     tx_count
+        numeric total_value
+        numeric avg_ticket
+        int     rank_by_value_within_currency
+    }
+
+    %% =========================================================================
+    %% Relationships
+    %% =========================================================================
+
+    %% Staging → dimensions/facts promotion
+    stg_accounts       ||--|| dim_account            : promoted_to
+    stg_transactions   ||--|| fct_transactions       : promoted_to
+    stg_loans          ||--|| fct_loans              : promoted_to
+
+    %% Dim → fact (1:N)
+    dim_customer       ||--o{ dim_account            : owns
+    dim_customer       ||--o{ fct_transactions       : initiates
+    dim_customer       ||--o{ fct_loans              : holds
+    dim_account        ||--o{ fct_transactions       : records
+    dim_loan           ||--|| fct_loans              : describes
+
+    %% Dim → dim (1:1 customer enrichments)
+    dim_customer       ||--|| dim_credit_info        : credit_profile
+    dim_customer       ||--|| dim_digital_engagement : engagement_profile
+    dim_customer       ||--|| agg_customer_activity  : activity_counts
+
+    %% Geography lookup
+    dim_geography      ||--o{ dim_customer           : located_in
+
+    %% Intermediate sources (1:1 enrichments of upstream facts/dims)
+    fct_loans          ||--|| int_loan_portfolio_metrics  : enriches
+    dim_customer       ||--|| int_customer_risk_profile   : enriches
+    dim_customer       ||--|| int_customer_monthly_revenue: enriches

@@ -1711,63 +1711,69 @@ subyacente nueva sin re-generar el snapshot.
 
 ---
 
-## PowerBI integration and downstream DQ findings
+## Integración con PowerBI y hallazgos de DQ downstream
 
-### Setup
+### Configuración
 
-PowerBI Desktop connected to PostgreSQL on localhost:5432 via native 
-connector (Import mode, not DirectQuery). Only `gold.mart_*` tables 
-imported; bronze and silver excluded from the .pbix.
+PowerBI Desktop conectado a PostgreSQL en localhost:5432 mediante el
+conector nativo (modo Import, no DirectQuery). Solo se importaron las
+tablas `gold.mart_*`; bronze y silver quedaron excluidas del `.pbix`.
 
-No model relationships configured between marts. Each mart is pre-aggregated
-in dbt with its own grain and self-contains the dimensional context. This
-reflects a "wide marts" pattern intentionally chosen over star schema,
-defensible because the agregaciones live in dbt (auditable, tested) rather
-than in DAX (opaque, untested).
+No se configuraron relaciones en el modelo entre marts. Cada mart está
+preagregado en dbt con su propio grano y contiene internamente todo el
+contexto dimensional. Esto refleja intencionalmente un patrón de “wide marts”
+en lugar de un esquema estrella, defendible porque las agregaciones viven
+en dbt (auditables, testeadas) y no en DAX (opaco, no testeado).
 
-### Bug found via PowerBI integration: monthly_fee_revenue blowup
+### Bug encontrado mediante integración con PowerBI: explosión de `monthly_fee_revenue`
 
-When validating the four base DAX measures on Page 1 KPI cards, 
-`Avg Revenue per Customer USD` returned $1.03M/month/customer, which 
-is implausible by 4+ orders of magnitude.
+Al validar las cuatro medidas DAX base en las KPI cards de la Página 1,
+`Avg Revenue per Customer USD` devolvía USD 1.03M/mes/cliente, lo cual
+es implausible por más de 4 órdenes de magnitud.
 
-Diagnosis via SQL on `gold.mart_customer_360`:
-- 721 customers (14.4%) have `total_revenue_monthly > $1M`
-- max = $207,379,782 (CUST-0003449, sme, tenure_months=1)
-- The top 10 outliers all share `tenure_months ≤ 3` OR have 
-  abnormally high interest income.
+Diagnóstico vía SQL sobre `gold.mart_customer_360`:
 
-**Root cause #1 — Fee revenue division-by-near-zero:**
-The original formula `monthly_fee_revenue = total_fees_paid_lifetime / tenure_months`
-correctly normalized lifetime fees to monthly scale (Day 9 fix), but
-broke for customers with tenure 1-3 months. A customer who paid $200M in
-fees during month 1 would project $200M/month, treating lifetime as
-run-rate. This is a flaw in the formula, not in source data.
+* 721 clientes (14.4%) tienen `total_revenue_monthly > $1M`
+* máximo = $207,379,782 (`CUST-0003449`, `sme`, `tenure_months=1`)
+* Los 10 mayores outliers comparten `tenure_months ≤ 3` O tienen
+  ingresos por intereses anormalmente altos.
 
-**Fix:** clamp denominator with `GREATEST(tenure_months, 3)`. Trade-off:
-underestimates revenue for genuinely young + active customers, but
-stabilizes the metric for the 38+71+74 = 183 customers (3.7%) with 
-tenure ≤ 2. Applied in `mart_customer_360.sql` and `mart_revenue_by_segment_usd.sql`.
+**Causa raíz #1 — División de fee revenue por valores cercanos a cero:**
+La fórmula original `monthly_fee_revenue = total_fees_paid_lifetime / tenure_months`
+normalizaba correctamente los fees lifetime a escala mensual (fix del Día 9),
+pero fallaba para clientes con antigüedad de 1-3 meses. Un cliente que pagó
+$200M en fees durante el primer mes proyectaría $200M/mes, tratando el valor
+lifetime como si fuera un run-rate mensual. Esto es un defecto de la fórmula,
+no de los datos fuente.
 
-**Root cause #2 — Source data: extreme outliers in outstanding_balance:**
-Independent of fee logic, `monthly_interest_income` showed customers with
-$20-37M/month interest accrual. Investigation:
-- `interest_rate_decimal`: validated, range [0.0301, 0.35], median 19.4%. 
-  Day 9 fix is correct.
-- `outstanding_balance` in `silver.fct_loans`: max $1,841,582,518.
-  1,227 loans > $1M, 452 loans > $100M, all in COP currency for
-  retail/SME customers labeled as auto loans.
-- Example: CUST-0001189 has a COP $1,285M auto loan. The math is correct
-  ($1.285B × 0.3469 / 12 = $37.16M COP interest/month).
+**Fix:** limitar el denominador con `GREATEST(tenure_months, 3)`. Trade-off:
+subestima revenue para clientes genuinamente jóvenes y activos, pero
+estabiliza la métrica para los 38+71+74 = 183 clientes (3.7%) con
+`tenure ≤ 2`. Aplicado en `mart_customer_360.sql` y
+`mart_revenue_by_segment_usd.sql`.
 
-This is a property of the **synthetic dataset**, not a pipeline bug. The
-generator created retail loans with corporate-finance-scale balances,
-inconsistent with the segments. This joins the growing list of generator
-artifacts already documented (DPD distribution flat at 50%, risk_score
-not correlated with delinquency, customer_segment not correlated with
-revenue, etc.).
+**Causa raíz #2 — Datos fuente: outliers extremos en `outstanding_balance`:**
+Independientemente de la lógica de fees, `monthly_interest_income` mostraba
+clientes con acumulación de intereses de $20-37M/mes. Investigación:
 
-**Action:** instrumented as a `warn`-level test:
+* `interest_rate_decimal`: validado, rango [0.0301, 0.35], mediana 19.4%.
+  El fix del Día 9 es correcto.
+* `outstanding_balance` en `silver.fct_loans`: máximo $1,841,582,518.
+  1,227 préstamos > $1M, 452 préstamos > $100M, todos en moneda COP para
+  clientes retail/SME etiquetados como auto loans.
+* Ejemplo: `CUST-0001189` tiene un préstamo automotor en COP por $1,285M.
+  La matemática es correcta:
+  ($1.285B × 0.3469 / 12 = $37.16M COP de interés/mes).
+
+Esto es una propiedad del **dataset sintético**, no un bug del pipeline.
+El generador creó préstamos retail con balances a escala de finanzas
+corporativas, inconsistentes con los segmentos asignados. Esto se suma
+a la creciente lista de artefactos del generador ya documentados
+(distribución DPD plana al 50%, `risk_score` no correlacionado con mora,
+`customer_segment` no correlacionado con revenue, etc.).
+
+**Acción:** instrumentado como test `warn`:
+
 ```yaml
 - name: outstanding_balance
   tests:
@@ -1776,130 +1782,163 @@ revenue, etc.).
         config:
           severity: warn
 ```
-`dbt test` now produces a visible warning on every run, making this
-DQ issue self-documenting in the build output.
 
-Additionally, `mart_customer_360.total_revenue_monthly` got a `warn`-level
-range test (>= 0 and < 1M). With the Day 11 fix, this is expected to 
-warn on ~30-50 customers (down from 721), all attributable to interest
-on the corporate-scale loans above. Confirms the fee bug is fully closed
-and the residual is source-data, not formula.
+`dbt test` ahora genera una advertencia visible en cada ejecución,
+haciendo que este problema de DQ quede auto-documentado en el output
+del build.
 
-### Dashboard implication: median over average
+Adicionalmente, `mart_customer_360.total_revenue_monthly` recibió un
+test de rango `warn` (`>= 0 and < 1M`). Con el fix del Día 11, se espera
+que esto genere warning sobre ~30-50 clientes (bajando desde 721), todos
+atribuibles a intereses provenientes de los préstamos corporativos
+mencionados arriba. Esto confirma que el bug de fees quedó completamente
+cerrado y que el residual pertenece a los datos fuente, no a la fórmula.
 
-Given the long-tail residual from interest outliers, the Executive 
-Overview KPI changed from `AVG(total_revenue_monthly)` to `MEDIAN`. 
-The mediana is the statistically correct location measure for any 
-right-skewed financial distribution (always true for revenue per customer
-in real banking) and is robust to the residual synthetic outliers.
+### Implicancia para el dashboard: mediana sobre promedio
 
-New DAX: 
+Dado el long-tail residual causado por los outliers de intereses,
+el KPI del Executive Overview cambió de `AVG(total_revenue_monthly)`
+a `MEDIAN`.
+
+La mediana es la medida estadística de tendencia central correcta para
+cualquier distribución financiera sesgada a la derecha (siempre cierto
+para revenue por cliente en banca real) y es robusta frente a los
+outliers sintéticos residuales.
+
+Nuevo DAX:
+
+```DAX
 Median Revenue per Customer USD =
 MEDIANX(mart_customer_360, mart_customer_360[total_revenue_monthly])
+```
 
-Documented on the dashboard via a tooltip on the KPI card.
+Documentado en el dashboard mediante un tooltip sobre la KPI card.
 
-### Currency strategy in dashboard
+### Estrategia de moneda en el dashboard
 
-[completar con lo que decidas: USD-only / global slicer / multi-leyenda]
+[completar con lo que decidas: solo USD / slicer global / multi-leyenda]
 
-### Process lesson
+### Lección de proceso
 
-The bug had been latent since Day 9. dbt tests didn't catch it because:
-- `expression_is_true: ">= 0"` passes for $206M (it IS >= 0).
-- No magnitude / range / outlier test existed on revenue metrics.
+El bug había permanecido latente desde el Día 9. Los tests de dbt no lo
+detectaron porque:
 
-The bug surfaced only when a downstream BI consumer rendered the number
-to a human-readable card. **Lesson:** numeric metrics need magnitude 
-tests, not just sign tests, especially when they're derived from divisions
-or accruals. The new `warn`-level test on `total_revenue_monthly` is the
-generalized fix.
+* `expression_is_true: ">= 0"` pasa para $206M (efectivamente es `>= 0`).
+* No existían tests de magnitud / rango / outliers sobre métricas de revenue.
 
-### Post-fix diagnosis of residual outliers
+El bug emergió únicamente cuando un consumidor BI downstream renderizó el
+valor en una card legible para humanos. **Lección:** las métricas numéricas
+necesitan tests de magnitud, no solo tests de signo, especialmente cuando
+derivan de divisiones o accruals. El nuevo test `warn` sobre
+`total_revenue_monthly` es la generalización de este fix.
 
-After applying the tenure-clamp fix, 722 customers (down from 721) still
-showed `total_revenue_monthly > $1M`. The count being nearly identical
-suggested the fix had a different effect than naively reducing outlier
-count — it instead reduced the **magnitude** of individual blowups
-(CUST-0003449 fee_revenue went from $206M to $68.9M) without removing
-them from the >$1M bucket.
+### Diagnóstico post-fix de los outliers residuales
 
-Decomposition of the 722 outliers:
-- 369 (51%) driven by interest_income alone (avg tenure 36.7 months,
-  not affected by the clamp). Root cause: ~693 source loans with 
-  outstanding_balance > $100M.
-- 265 (37%) driven by fee_revenue alone (avg tenure 27.3 months,
-  outside the clamp window). Root cause: source customers with 
-  total_fees_paid_lifetime in the corporate-finance scale 
-  (e.g., CUST-0000347: $348M lifetime fees over 27 months tenure).
-- 73 (10%) with both components in the millions.
-- 15 (2%) below $1M individually but above when summed.
+Luego de aplicar el fix del tenure clamp, 722 clientes (vs. 721 antes)
+seguían mostrando `total_revenue_monthly > $1M`. Que el conteo fuera casi
+idéntico sugirió que el fix tuvo un efecto distinto al esperado ingenuamente:
+en lugar de reducir el número de outliers, redujo la **magnitud** de los
+blowups individuales (`CUST-0003449` pasó de $206M a $68.9M en fee_revenue)
+sin sacarlos necesariamente del bucket `>$1M`.
 
-The synthetic dataset thus contains two parallel "scale escapes" 
-(loans + fees), both inconsistent with the implied retail/SME segments
-of the affected customers. Both are now documented as warn-level dbt
-tests, making them visible on every build without blocking the pipeline.
+Descomposición de los 722 outliers:
 
-Conclusion: the Day 11 formula fix is complete. Residual outliers are
-**source data, not pipeline behavior**. The median (not mean) is therefore
-the statistically correct KPI for the dashboard, and the warn tests
-serve as ongoing evidence of the source-data limitations.
+* 369 (51%) impulsados únicamente por `interest_income`
+  (tenure promedio 36.7 meses, no afectados por el clamp).
+  Causa raíz: ~693 préstamos fuente con `outstanding_balance > $100M`.
+* 265 (37%) impulsados únicamente por `fee_revenue`
+  (tenure promedio 27.3 meses, fuera de la ventana afectada por el clamp).
+  Causa raíz: clientes fuente con `total_fees_paid_lifetime` a escala
+  corporativa (ej.: `CUST-0000347`: $348M en fees lifetime sobre
+  27 meses de tenure).
+* 73 (10%) con ambos componentes en millones.
+* 15 (2%) por debajo de $1M individualmente pero superiores al sumar ambos.
 
-### New marts created during dashboard integration
+El dataset sintético contiene entonces dos “scale escapes” paralelos
+(préstamos + fees), ambos inconsistentes con los segmentos retail/SME
+implícitos de los clientes afectados. Ambos quedaron documentados como
+tests `warn` en dbt, haciéndolos visibles en cada build sin bloquear
+el pipeline.
 
-PowerBI maquetación de Página 2 surfaced two gaps in the existing 
-Gold layer:
+Conclusión: el fix de fórmula del Día 11 está completo. Los outliers
+residuales pertenecen a los **datos fuente, no al comportamiento del pipeline**.
+Por lo tanto, la mediana (no el promedio) es el KPI estadísticamente correcto
+para el dashboard, y los tests `warn` funcionan como evidencia continua de
+las limitaciones del dataset fuente.
 
-**Gap 1 — Top merchants ranking (Q22):**
-`mart_top_merchants` was added with grain (merchant × currency).
-Aggregates only completed transactions, ranks within currency to
-avoid mixing scales across LATAM currencies. Includes a `top_category`
-enrichment column computed via window function with deterministic
-tiebreaker (alphabetical), so each merchant row carries the most
-frequent category as qualitative context. The dashboard's top-10
-merchants table filters by `rank_by_value_within_currency <= 10` and
-binds to the global currency slicer.
+### Nuevos marts creados durante la integración del dashboard
 
-The column was named `merchant` (not `merchant_name` as originally
-assumed) — first attempt failed at `dbt run` with "column does not 
-exist", verified via `information_schema.columns`, patched in one
-iteration.
+La maquetación de la Página 2 en PowerBI expuso dos vacíos en la capa Gold existente.
 
-**Gap 2 — Monthly revenue time series (Q2):**
-`mart_revenue_by_segment_usd` is snapshot-grained (1 row per segment)
-and cannot drive a time-series line chart. `mart_revenue_monthly_by_segment_usd`
-was added with grain (revenue_month × customer_segment) to power
-the dashboard's main line chart.
+**Gap 1 — Ranking de top merchants (Q22):**
+Se agregó `mart_top_merchants` con grano (`merchant × currency`).
 
-Two design decisions in this mart:
+Agrega únicamente transacciones completadas y rankea dentro de cada moneda
+para evitar mezclar escalas entre monedas LATAM. Incluye una columna
+`top_category` calculada mediante window function con tiebreaker
+determinístico (alfabético), de forma que cada merchant queda enriquecido
+con su categoría más frecuente como contexto cualitativo.
 
-1. **Current-month cutoff:** the current calendar month is excluded
-   via `WHERE transaction_date < date_trunc('month', current_date)`.
-   Otherwise a partial-current-month would render as a sharp drop
-   at the right edge of the line chart, misleading viewers into
-   reading it as a trend reversal.
+La tabla Top-10 del dashboard filtra por
+`rank_by_value_within_currency <= 10` y se conecta al slicer global de moneda.
 
-2. **Interest accrual simplification:** `silver.fct_loans` has no
-   loan_schedule table — only a snapshot `outstanding_balance` and
-   `start_date`. Monthly interest is allocated as a flat monthly
-   accrual (balance × rate / 12) attributed identically to every
-   month from `start_date` forward, capped at the cutoff.
+La columna se llamaba `merchant` (no `merchant_name` como se asumió
+originalmente). El primer intento falló en `dbt run` con
+“column does not exist”; se verificó vía `information_schema.columns`
+y se corrigió en una iteración.
 
-   Implications:
-   - Older months may be slightly overstated (loans that closed
-     historically still appear "current" with no closure date in source)
-   - Interest revenue grows roughly linearly while fee revenue grows
-     exponentially in the data — this is consistent with the source
-     and produces a meaningful fee/interest ratio shift over time
-     (jun 2025: 27/73; apr 2026: 65/35), interpretable as a transition
-     from balance-sheet-revenue-dominant to transaction-revenue-dominant.
+**Gap 2 — Serie temporal de revenue mensual (Q2):**
+`mart_revenue_by_segment_usd` tiene grano snapshot (1 fila por segmento)
+y no puede alimentar un line chart temporal. Se agregó
+`mart_revenue_monthly_by_segment_usd` con grano
+(`revenue_month × customer_segment`) para alimentar el gráfico principal
+del dashboard.
 
-   In production, a `loan_schedule` table would replace this
-   simplification. Documented as a known limitation.
+Dos decisiones de diseño en este mart:
 
-**Time range observed in source:** Sept 2020 → May 2026. After cutoff:
-Sept 2020 → April 2026 (61 months × 4 segments = 244 rows).
+1. **Cutoff del mes actual:**
+   El mes calendario actual se excluye mediante:
 
-Both marts received standard schema tests (not_null on grain keys,
-expression_is_true `>= 0` on monetary columns, accepted_values where
-applicable).
+   ```sql
+   WHERE transaction_date < date_trunc('month', current_date)
+   ```
+
+   De lo contrario, un mes parcial renderizaría como una caída abrupta
+   al final del line chart, induciendo erróneamente a interpretarlo como
+   un cambio de tendencia.
+
+2. **Simplificación del accrual de intereses:**
+   `silver.fct_loans` no posee una tabla `loan_schedule`; solo existe un
+   snapshot con `outstanding_balance` y `start_date`.
+
+   El interés mensual se distribuye como un accrual plano:
+   `(balance × rate / 12)`,
+   asignado idénticamente a cada mes desde `start_date` en adelante,
+   limitado por el cutoff.
+
+   Implicancias:
+
+   * Los meses antiguos pueden quedar levemente sobreestimados
+     (préstamos históricamente cerrados siguen apareciendo “activos”
+     porque no existe fecha de cierre en la fuente).
+   * El revenue por intereses crece aproximadamente de forma lineal,
+     mientras que el revenue por fees crece exponencialmente en los datos.
+     Esto es consistente con la fuente y genera un shift interpretable
+     en la relación fee/interés a lo largo del tiempo
+     (jun 2025: 27/73; abr 2026: 65/35), interpretable como una transición
+     desde un modelo dominado por revenue de balance sheet hacia uno
+     dominado por revenue transaccional.
+
+   En producción, una tabla `loan_schedule` reemplazaría esta simplificación.
+   Documentado como limitación conocida.
+
+**Rango temporal observado en la fuente:**
+Septiembre 2020 → Mayo 2026.
+Luego del cutoff: Septiembre 2020 → Abril 2026
+(61 meses × 4 segmentos = 244 filas).
+
+Ambos marts recibieron tests estándar de schema:
+
+* `not_null` sobre claves de grano
+* `expression_is_true >= 0` sobre columnas monetarias
+* `accepted_values` donde aplica.
