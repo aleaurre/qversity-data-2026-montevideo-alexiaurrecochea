@@ -2,6 +2,7 @@
 -- Esto evita tener que hacerlo manual o desde Airflow después.
 CREATE SCHEMA IF NOT EXISTS bronze;
 CREATE SCHEMA IF NOT EXISTS silver;
+CREATE SCHEMA IF NOT EXISTS silver_raw AUTHORIZATION qversity;
 CREATE SCHEMA IF NOT EXISTS gold;
 
 -- Schema separado para Airflow metadata (mejor práctica que mezclar con warehouse)
