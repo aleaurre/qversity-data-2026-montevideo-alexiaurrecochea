@@ -8,8 +8,9 @@ DAG that:
   4. Runs three PySpark jobs IN PARALLEL that flatten each nested array
      (accounts, transactions, loans) into the silver_raw schema, with
      dedup by each array's natural PK and basic syntactic cleanup.
-  5. Loads the static dbt seeds (fx_rates, country_currency) into silver.
-  6. Runs the full dbt project (staging → silver → intermediate → gold)
+  5. Installs dbt packages (dbt_utils) from packages.yml.
+  6. Loads the static dbt seeds (fx_rates, country_currency) into silver.
+  7. Runs the full dbt project (staging → silver → intermediate → gold)
      and the full test suite.
 
 Idempotency: every run gets a unique load_id (UUID). The Spark dedup logic
@@ -226,7 +227,7 @@ def qversity_pipeline():
     flatten_loans        = build_flatten_task("flatten_loans")
 
     # -----------------------------------------------------------------------
-    # dbt tasks: seeds → full project build → full test suite
+    # dbt tasks: deps → seeds → full project build → full test suite
     # -----------------------------------------------------------------------
     # Por qué BashOperator y no un operador dbt dedicado:
     #   - El provider oficial airflow-dbt requiere pinning de versiones y
@@ -242,6 +243,15 @@ def qversity_pipeline():
     # fuera de este DAG (debug manual desde shell), el flag explícito
     # lo hace funcionar sin depender del entorno.
     #
+    # Por qué dbt_deps corre como una task separada antes de todas las demás:
+    # los paquetes declarados en packages.yml (dbt_utils en nuestro caso)
+    # son requeridos en tiempo de compilación por muchos tests
+    # (relationships, accepted_values, expression_is_true). dbt NO los
+    # instala automáticamente al correr seed/run/test — necesita una
+    # invocación explícita de `dbt deps`. dbt_packages/ NO se commitea
+    # al repo (ignored en .gitignore), así que en un clean clone hace
+    # falta este paso.
+    #
     # Por qué dbt_seed corre como una task separada antes de dbt_run:
     # los seeds (CSVs en dbt/seeds/: fx_rates, country_currency) son inputs
     # estáticos que varios modelos joinean. dbt NO los carga como parte de
@@ -251,6 +261,18 @@ def qversity_pipeline():
     #
     # Sin `--select`: dbt corre TODO el proyecto (3 stg + 7 dim + 2 fct +
     # 1 agg + 3 int + 18 marts = 34 modelos, ~434 tests).
+    dbt_deps = BashOperator(
+        task_id="dbt_deps",
+        bash_command=(
+            f"cd {DBT_PROJECT_DIR} && "
+            f"dbt deps "
+            f"--profiles-dir {DBT_PROJECT_DIR} "
+            f"--project-dir {DBT_PROJECT_DIR}"
+        ),
+        env=DBT_ENV,
+        append_env=True,
+    )
+
     dbt_seed = BashOperator(
         task_id="dbt_seed",
         bash_command=(
@@ -292,7 +314,7 @@ def qversity_pipeline():
     # -----------------------------------------------------------------------
     # Pipeline completo:
     #   ensure → download → load → [3 flatteners en paralelo]
-    #         → dbt_seed → dbt_run → dbt_test
+    #         → dbt_deps → dbt_seed → dbt_run → dbt_test
     #
     # Por qué dbt_run >> dbt_test (secuencial) en lugar de paralelo:
     # los tests aseveran sobre el output del run. Correrlos en paralelo
@@ -306,7 +328,7 @@ def qversity_pipeline():
         flatten_accounts,
         flatten_transactions,
         flatten_loans,
-    ] >> dbt_seed >> dbt_run >> dbt_test
+    ] >> dbt_deps >> dbt_seed >> dbt_run >> dbt_test
 
 
 qversity_pipeline()
