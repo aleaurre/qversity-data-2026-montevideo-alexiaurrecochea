@@ -1,4 +1,4 @@
-# Submission Checklist — Section 10 of the project brief
+# Submission Checklist 
 
 This document maps every item from the spec's submission checklist to an
 exact command and a pass criterion. Run top to bottom; stop at the first

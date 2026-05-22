@@ -1,4 +1,4 @@
-# Reproducibility test plan — Day 13, evening block
+# Reproducibility test plan
 
 Goal: prove the README is sufficient. Anyone with Docker + Power BI Desktop
 should clone the repo, follow the README literally, and reach a working
