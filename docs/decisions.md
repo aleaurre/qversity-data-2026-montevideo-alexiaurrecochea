@@ -1942,3 +1942,98 @@ Ambos marts recibieron tests estándar de schema:
 * `not_null` sobre claves de grano
 * `expression_is_true >= 0` sobre columnas monetarias
 * `accepted_values` donde aplica.
+
+
+## Hallazgos del test de reproducibilidad
+
+El test de reproducibilidad desde clean clone destapó cinco bugs de
+infraestructura invisibles durante el desarrollo normal (porque el
+estado local se había ido construyendo incrementalmente a lo largo de
+los días previos). Los cinco están ahora arreglados y el dry-run
+completa de punta a punta tanto en Windows/amd64 como en macOS/arm64.
+
+### Bug 1 — Schema `silver_raw` faltante en `init_db.sql`
+
+Spark escribe sus outputs flatteneados en `silver_raw.stg_*`, pero el
+script de bootstrap solo creaba `bronze`, `silver` y `gold`. El schema
+`silver_raw` se había creado manualmente en el Día 1 y nunca se había
+incluido en el init. Después de `docker compose down -v` el volumen
+quedó limpio y el schema no existía, lo que hacía fallar las tres tasks
+de flatten de Spark con "schema does not exist".
+
+**Fix:** agregada la línea
+`CREATE SCHEMA IF NOT EXISTS silver_raw AUTHORIZATION qversity;`
+en `init_db.sql`.
+
+### Bug 2 — DAG corriendo `dbt --select` con un selector MVP obsoleto
+
+Las tasks `dbt_run_mvp` y `dbt_test_mvp` todavía cargaban el flag
+`--select silver.dim_customer gold.customer_summary` del scaffolding
+del Día 5. Dos consecuencias: solo se construía `dim_customer` (lo
+que hacía fallar 14 tests de `relationships` en estado limpio porque
+las relaciones a las que apuntaban no existían), y
+`gold.customer_summary` ya no existe (fue refactorizado a
+`silver.agg_customer_activity` en el Día 6).
+
+**Fix:** removido el selector de ambos comandos y renombradas las
+tasks a `dbt_run` / `dbt_test`. Ahora corren el proyecto completo.
+
+### Bug 3 — `dbt seed` nunca invocado por el DAG
+
+Varios modelos (`int_customer_monthly_revenue`,
+`mart_revenue_by_segment_usd`,
+`mart_revenue_monthly_by_segment_usd`,
+`mart_international_transfers`) hacen join contra tablas de seed
+(`fx_rates`, `country_currency`) que viven como CSVs en `dbt/seeds/`.
+dbt NO carga los seeds como parte de `dbt run` — requieren una
+invocación explícita de `dbt seed`. Los seeds se habían cargado
+manualmente durante el desarrollo temprano y nunca se había agregado
+el paso al DAG.
+
+**Fix:** agregada una task `dbt_seed` entre el grupo de Spark y
+`dbt_run`.
+
+### Bug 4 — `JAVA_HOME` hardcodeado al path de amd64
+
+Tanto el Dockerfile como el DAG hardcodeaban
+`JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64`. En Apple Silicon
+(arm64), openjdk se instala en
+`/usr/lib/jvm/java-17-openjdk-arm64`, por lo que `spark-submit` no
+podía encontrar el binario de Java en los Macs M-series. Las tres
+tasks de flatten fallaban con "java: No such file or directory".
+
+**Fix:**
+- El Dockerfile ahora detecta el path real de la JVM en tiempo de
+  build vía `readlink` sobre el binario `java`, y crea un symlink
+  estable en `/usr/lib/jvm/default-java`. `JAVA_HOME` apunta a ese
+  symlink y funciona en ambas arquitecturas sin lógica condicional.
+- El `SPARK_ENV` del DAG ya no setea `JAVA_HOME`, así que el valor
+  del container (correcto para la arquitectura real) se propaga
+  vía `append_env=True`.
+
+Reportado por compañeros corriendo en Apple Silicon durante el
+dry-run del Día 13.
+
+### Bug 5 — `dbt deps` nunca invocado por el DAG
+
+El proyecto dbt depende de `dbt_utils` (declarado en
+`dbt/packages.yml`, usado por muchos tests incluyendo
+`relationships`, `accepted_values` y `expression_is_true`). dbt no
+instala paquetes automáticamente — requieren `dbt deps`. El
+directorio `dbt_packages/` se había mantenido localmente entre runs
+porque el directorio está bind-mounteado, y nunca se recreaba
+explícitamente. En un clean clone el directorio no existe y dbt
+aborta la compilación con:
+
+> `dbt found 1 package(s) specified in packages.yml, but only 0 package(s) installed in dbt_packages.`
+
+**Fix:** agregada una task `dbt_deps` antes de `dbt_seed`. También
+se agregó `dbt/dbt_packages/` al `.gitignore` para mantenerlo como
+artefacto de build en vez de código commiteado.
+
+### Conclusión
+
+Los cinco eran bugs clásicos de "anda en mi máquina" — invisibles
+hasta el clean clone. Su detección valida el valor del test de
+reproducibilidad en sí mismo. El pipeline ahora es genuinamente
+reproducible entre plataformas.
