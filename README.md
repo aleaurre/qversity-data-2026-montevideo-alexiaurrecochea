@@ -306,8 +306,7 @@ The diagram lives at `docs/diagrams/erd_silver_gold.png`; the source is at
 | Digital  | `mart_digital_adoption_by_segment` | 1 customer_segment | Q20 |
 | Digital  | `mart_channel_preference_by_age`   | age_bucket × preferred_channel | Q21 |
 
-Coverage: **24 / 24** business questions (23 ✅ + Q13 ⚠️ documented with
-spec-vs-dataset divergence). The detailed mart-to-question mapping with
+Coverage: **24 / 24** business questions. The detailed mart-to-question mapping with
 executable validation queries lives in
 [`docs/business_questions.md`](docs/business_questions.md).
 
