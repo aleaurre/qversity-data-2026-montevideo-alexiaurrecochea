@@ -22,7 +22,7 @@ FROM apache/airflow:2.10.5-python3.11
 #                               propios procesos hijos. Sin esto, Spark loggea
 #                               warnings molestos al iniciar cada job.
 #   - git                     : para clonar el repo dbt en el bind mount. No es
-#                               estrictamente necesario, pero facilita el workflow.         
+#                               estrictamente necesario, pero facilita el workflow.
 # ─────────────────────────────────────────────────────────────────────────────
 
 USER root
@@ -37,7 +37,29 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+# ─────────────────────────────────────────────────────────────────────────────
+# JAVA_HOME — arquitectura-agnóstico (amd64 + arm64).
+#
+# Por qué NO hardcodeamos /usr/lib/jvm/java-17-openjdk-amd64:
+# Esa ruta solo existe en x86_64 (Intel/AMD). En Apple Silicon (M1/M2/M3)
+# Docker corre la imagen arm64 nativamente y openjdk se instala en
+# /usr/lib/jvm/java-17-openjdk-arm64. Hardcodear amd64 rompe los flatten
+# tasks de Spark en Mac con un "java: No such file or directory".
+#
+# Solución: detectar la ruta en tiempo de build vía readlink sobre el
+# binario `java` (que update-alternatives mantiene como symlink genérico),
+# y exportarla como ENV. Esto graba el valor correcto para LA arquitectura
+# en la que se está construyendo la imagen — amd64 en CI/Windows/Linux
+# x86, arm64 en Mac M*. Funciona para ambas sin un solo `if`.
+#
+# Surgió en el dry-run de reproducibilidad del Día 13 cuando colegas en
+# Apple Silicon clonaron desde cero.
+# ─────────────────────────────────────────────────────────────────────────────
+RUN JAVA_PATH=$(dirname $(dirname $(readlink -f $(which java)))) \
+    && echo "export JAVA_HOME=${JAVA_PATH}" > /etc/profile.d/java.sh \
+    && ln -sfn ${JAVA_PATH} /usr/lib/jvm/default-java
+
+ENV JAVA_HOME=/usr/lib/jvm/default-java
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 # ─────────────────────────────────────────────────────────────────────────────
