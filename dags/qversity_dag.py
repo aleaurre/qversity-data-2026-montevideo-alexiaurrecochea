@@ -66,7 +66,6 @@ SPARK_ENV = {
     "POSTGRES_USER":     os.getenv("POSTGRES_USER", ""),
     "POSTGRES_PASSWORD": os.getenv("POSTGRES_PASSWORD", ""),
     "PATH": "/home/airflow/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    "JAVA_HOME": "/usr/lib/jvm/java-17-openjdk-amd64",
 }
 
 # Env para dbt. Mismas POSTGRES_* que Spark, profiles.yml las lee con env_var().
