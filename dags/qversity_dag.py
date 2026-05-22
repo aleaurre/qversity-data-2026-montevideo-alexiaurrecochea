@@ -6,10 +6,10 @@ DAG that:
   2. Downloads the fintech dataset from a public S3 bucket.
   3. Loads each customer record into bronze.raw_fintech_data as JSONB.
   4. Runs three PySpark jobs IN PARALLEL that flatten each nested array
-     (accounts, transactions, loans) into the silver schema, with dedup
-     by each array's natural PK and basic syntactic cleanup.
-  5. Runs dbt models (silver.dim_customer + gold.customer_summary) and
-     their tests.
+     (accounts, transactions, loans) into the silver_raw schema, with
+     dedup by each array's natural PK and basic syntactic cleanup.
+  5. Runs the full dbt project (staging → silver → intermediate → gold)
+     and the full test suite.
 
 Idempotency: every run gets a unique load_id (UUID). The Spark dedup logic
 keeps only the most recent version of each (account_id | transaction_id |
@@ -53,7 +53,6 @@ JDBC_DRIVER = "/opt/spark/jars/postgresql-42.7.3.jar"
 
 # dbt job constants
 DBT_PROJECT_DIR = "/opt/airflow/dbt"
-DBT_MVP_SELECTOR = "silver.dim_customer gold.customer_summary"
 
 # Env vars que necesita cualquier spark-submit del proyecto.
 # BashOperator no propaga el env del scheduler por default, así que se lo
@@ -136,7 +135,7 @@ def build_flatten_task(script_name: str) -> BashOperator:
 # ---------------------------------------------------------------------------
 @dag(
     dag_id="qversity_pipeline",
-    description="Bronze ingestion + Silver flatten (PySpark) + dbt silver/gold MVP.",
+    description="Bronze ingestion + Silver flatten (PySpark) + full dbt silver/gold build.",
     start_date=datetime(2026, 1, 1),
     schedule=None,             # manual trigger; dataset is static
     catchup=False,
@@ -218,8 +217,8 @@ def qversity_pipeline():
     # Spark tasks: 3 flatteners in parallel
     # -----------------------------------------------------------------------
     # Cada uno lee bronze independientemente y escribe su propia staging
-    # table en silver. No hay dependencias entre ellos, así que pueden ir
-    # en paralelo. Para que esto efectivamente paralelice hace falta que
+    # table en silver_raw. No hay dependencias entre ellos, así que pueden
+    # ir en paralelo. Para que esto efectivamente paralelice hace falta que
     # Airflow esté corriendo con LocalExecutor (o superior); con
     # SequentialExecutor van a ejecutarse uno tras otro igual.
     flatten_accounts     = build_flatten_task("flatten_accounts")
@@ -227,7 +226,7 @@ def qversity_pipeline():
     flatten_loans        = build_flatten_task("flatten_loans")
 
     # -----------------------------------------------------------------------
-    # dbt tasks: silver model + gold MVP, then tests
+    # dbt tasks: full project build, then full test suite
     # -----------------------------------------------------------------------
     # Por qué BashOperator y no un operador dbt dedicado:
     #   - El provider oficial airflow-dbt requiere pinning de versiones y
@@ -243,29 +242,30 @@ def qversity_pipeline():
     # fuera de este DAG (debug manual desde shell), el flag explícito
     # lo hace funcionar sin depender del entorno.
     #
-    # Selector de día 5: solo los dos modelos MVP. Día 6 se amplía a
-    # `--select silver gold` o se quita el selector entero.
-    dbt_run_mvp = BashOperator(
-        task_id="dbt_run_mvp",
+    # Sin `--select`: dbt corre TODO el proyecto (3 stg + 7 dim + 2 fct +
+    # 1 agg + 3 int + 18 marts = 34 modelos, ~225 tests). El selector MVP
+    # del Día 5 quedó obsoleto cuando el modelo gold.customer_summary se
+    # refactorizó a silver.agg_customer_activity en el Día 6; este DAG
+    # ahora cubre el pipeline completo.
+    dbt_run = BashOperator(
+        task_id="dbt_run",
         bash_command=(
             f"cd {DBT_PROJECT_DIR} && "
             f"dbt run "
             f"--profiles-dir {DBT_PROJECT_DIR} "
-            f"--project-dir {DBT_PROJECT_DIR} "
-            f"--select {DBT_MVP_SELECTOR}"
+            f"--project-dir {DBT_PROJECT_DIR}"
         ),
         env=DBT_ENV,
         append_env=True,
     )
 
-    dbt_test_mvp = BashOperator(
-        task_id="dbt_test_mvp",
+    dbt_test = BashOperator(
+        task_id="dbt_test",
         bash_command=(
             f"cd {DBT_PROJECT_DIR} && "
             f"dbt test "
             f"--profiles-dir {DBT_PROJECT_DIR} "
-            f"--project-dir {DBT_PROJECT_DIR} "
-            f"--select {DBT_MVP_SELECTOR}"
+            f"--project-dir {DBT_PROJECT_DIR}"
         ),
         env=DBT_ENV,
         append_env=True,
@@ -289,7 +289,7 @@ def qversity_pipeline():
         flatten_accounts,
         flatten_transactions,
         flatten_loans,
-    ] >> dbt_run_mvp >> dbt_test_mvp
+    ] >> dbt_run >> dbt_test
 
 
 qversity_pipeline()
