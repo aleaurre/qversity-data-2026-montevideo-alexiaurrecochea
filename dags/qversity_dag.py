@@ -8,7 +8,8 @@ DAG that:
   4. Runs three PySpark jobs IN PARALLEL that flatten each nested array
      (accounts, transactions, loans) into the silver_raw schema, with
      dedup by each array's natural PK and basic syntactic cleanup.
-  5. Runs the full dbt project (staging → silver → intermediate → gold)
+  5. Loads the static dbt seeds (fx_rates, country_currency) into silver.
+  6. Runs the full dbt project (staging → silver → intermediate → gold)
      and the full test suite.
 
 Idempotency: every run gets a unique load_id (UUID). The Spark dedup logic
@@ -226,7 +227,7 @@ def qversity_pipeline():
     flatten_loans        = build_flatten_task("flatten_loans")
 
     # -----------------------------------------------------------------------
-    # dbt tasks: full project build, then full test suite
+    # dbt tasks: seeds → full project build → full test suite
     # -----------------------------------------------------------------------
     # Por qué BashOperator y no un operador dbt dedicado:
     #   - El provider oficial airflow-dbt requiere pinning de versiones y
@@ -242,11 +243,27 @@ def qversity_pipeline():
     # fuera de este DAG (debug manual desde shell), el flag explícito
     # lo hace funcionar sin depender del entorno.
     #
+    # Por qué dbt_seed corre como una task separada antes de dbt_run:
+    # los seeds (CSVs en dbt/seeds/: fx_rates, country_currency) son inputs
+    # estáticos que varios modelos joinean. dbt NO los carga como parte de
+    # `dbt run` — necesita una invocación explícita de `dbt seed`. Es
+    # idempotente: si los seeds ya existen, los recrea con el mismo
+    # contenido del CSV.
+    #
     # Sin `--select`: dbt corre TODO el proyecto (3 stg + 7 dim + 2 fct +
-    # 1 agg + 3 int + 18 marts = 34 modelos, ~225 tests). El selector MVP
-    # del Día 5 quedó obsoleto cuando el modelo gold.customer_summary se
-    # refactorizó a silver.agg_customer_activity en el Día 6; este DAG
-    # ahora cubre el pipeline completo.
+    # 1 agg + 3 int + 18 marts = 34 modelos, ~434 tests).
+    dbt_seed = BashOperator(
+        task_id="dbt_seed",
+        bash_command=(
+            f"cd {DBT_PROJECT_DIR} && "
+            f"dbt seed "
+            f"--profiles-dir {DBT_PROJECT_DIR} "
+            f"--project-dir {DBT_PROJECT_DIR}"
+        ),
+        env=DBT_ENV,
+        append_env=True,
+    )
+
     dbt_run = BashOperator(
         task_id="dbt_run",
         bash_command=(
@@ -275,7 +292,8 @@ def qversity_pipeline():
     # Dependencies
     # -----------------------------------------------------------------------
     # Pipeline completo:
-    #   ensure → download → load → [3 flatteners en paralelo] → dbt_run → dbt_test
+    #   ensure → download → load → [3 flatteners en paralelo]
+    #         → dbt_seed → dbt_run → dbt_test
     #
     # Por qué dbt_run >> dbt_test (secuencial) en lugar de paralelo:
     # los tests aseveran sobre el output del run. Correrlos en paralelo
@@ -289,7 +307,7 @@ def qversity_pipeline():
         flatten_accounts,
         flatten_transactions,
         flatten_loans,
-    ] >> dbt_run >> dbt_test
+    ] >> dbt_seed >> dbt_run >> dbt_test
 
 
 qversity_pipeline()
