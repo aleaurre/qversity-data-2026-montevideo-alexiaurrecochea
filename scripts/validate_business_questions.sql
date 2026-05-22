@@ -7,11 +7,11 @@
 --
 -- Usage (PowerShell, Windows host):
 --     Get-Content scripts/validate_business_questions.sql | `
---         docker exec -i <postgres_container> psql -U postgres -d qversity
+--         docker exec -i qversity_postgres psql -U qversity -d qversity_warehouse
 --
 -- Or copy to the container and run with -f:
---     docker cp scripts/validate_business_questions.sql <pg>:/tmp/
---     docker exec -it <pg> psql -U postgres -d qversity -f /tmp/validate_business_questions.sql
+--     docker cp scripts/validate_business_questions.sql qversity_postgres:/tmp/
+--     docker exec -it qversity_postgres psql -U qversity -d qversity_warehouse -f /tmp/validate_business_questions.sql
 --
 -- Or interactive: paste blocks manually after `\x auto`.
 -- ============================================================================
