@@ -3,19 +3,19 @@ version: 2
 models:
   - name: fct_transactions
     description: |
-      Fact table: una fila por transacción.
-      Promoción de stg_transactions con materialización table y FKs testeadas.
-      Derivaciones sintácticas: is_failed, day_of_week. Resto de derivaciones
-      de negocio (revenue, signed amounts) se calculan en gold.
+      Fact table: one row per transaction.
+      Promotion of stg_transactions with table materialization and tested FKs.
+      Syntactic derivations: is_failed, day_of_week. Remaining business
+      derivations (revenue, signed amounts) are computed in gold.
     columns:
       - name: transaction_id
-        description: PK de la transacción.
+        description: PK of the transaction.
         tests:
           - unique
           - not_null
 
       - name: customer_id
-        description: FK a dim_customer. 0 orphans confirmados en day 7.
+        description: FK to dim_customer. 0 orphans confirmed on day 7.
         tests:
           - not_null
           - relationships:
@@ -23,7 +23,7 @@ models:
               field: customer_id
 
       - name: account_id
-        description: FK a dim_account. 0 orphans confirmados en day 7.
+        description: FK to dim_account. 0 orphans confirmed on day 7.
         tests:
           - not_null
           - relationships:
@@ -31,39 +31,39 @@ models:
               field: account_id
 
       - name: transaction_date
-        description: Fecha de la transacción, ya parseada en stg_transactions.
+        description: Transaction date, already parsed in stg_transactions.
         tests:
           - not_null
 
       - name: amount
         description: |
-          Monto de la transacción. NO normalizado por currency (sin conversión FX
-          en silver — se difiere a gold si fuera necesario).
-        # Sin test not_null: el dataset tiene ~3% de amounts NULL (DQ del generator,
-        # documentado en decisions.md día 6). Si se quisiera test severity=warn,
-        # agregar acá; por ahora dejamos sin test.
+          Transaction amount. NOT normalized by currency (no FX conversion
+          in silver — deferred to gold if ever needed).
+        # No not_null test: the dataset has ~3% of amounts NULL (generator DQ,
+        # documented in decisions.md day 6). If a severity=warn test were
+        # desired, add it here; for now we leave it untested.
 
       - name: currency
-        description: Moneda de la transacción. ISO 4217.
+        description: Transaction currency. ISO 4217.
         tests:
           - not_null
 
       - name: transaction_type
-        description: Tipo de transacción. Normalizado en stg_transactions vía macro.
+        description: Transaction type. Normalized in stg_transactions via macro.
         tests:
           - not_null
           - accepted_values:
               values: ['deposit', 'withdrawal', 'transfer', 'payment', 'refund', 'fee']
 
       - name: channel
-        description: Canal por el que se realizó la transacción.
+        description: Channel through which the transaction was made.
         tests:
           - not_null
           - accepted_values:
               values: ['mobile', 'web', 'atm', 'branch', 'pos']
 
       - name: status
-        description: Estado de la transacción.
+        description: Transaction status.
         tests:
           - not_null
           - accepted_values:
@@ -71,23 +71,24 @@ models:
 
       - name: is_failed
         description: |
-          True si status = 'failed' estricto. Excluye pending (incompleta) y
-          reversed (completada+revertida). Pensado para BQ 18.
+          True iff status = 'failed' strictly. Excludes pending (incomplete)
+          and reversed (completed-then-reversed). Built for BQ 18.
         tests:
           - not_null
 
       - name: day_of_week
         description: |
-          Día de la semana extraído de transaction_date (Postgres DOW:
-          domingo=0, sábado=6). Pensado para BQ 16.
+          Day of week extracted from transaction_date (Postgres DOW:
+          Sunday=0, Saturday=6). Built for BQ 16.
         tests:
           - not_null
 
   - name: fct_loans
     description: |
-      Fact table: una fila por loan. Métricas financieras (principal, outstanding,
-      interest_rate) viven acá; descriptores como loan_type se replican para
-      facilitar agregaciones directas sobre el fact sin join obligatorio a dim_loan.
+      Fact table: one row per loan. Financial metrics (principal, outstanding,
+      interest_rate) live here; descriptors like loan_type are replicated to
+      enable direct aggregations over the fact without a mandatory join to
+      dim_loan.
     columns:
       - name: outstanding_balance
         description: |
@@ -106,13 +107,13 @@ models:
                 severity: warn
 
       - name: loan_id
-        description: PK del loan.
+        description: PK of the loan.
         tests:
           - unique
           - not_null
 
       - name: customer_id
-        description: FK a dim_customer. 0 orphans confirmados en day 7.
+        description: FK to dim_customer. 0 orphans confirmed on day 7.
         tests:
           - not_null
           - relationships:
@@ -120,7 +121,7 @@ models:
               field: customer_id
 
       - name: loan_type
-        description: Tipo de loan. Normalizado en stg_loans vía macro.
+        description: Loan type. Normalized in stg_loans via macro.
         tests:
           - not_null
           - accepted_values:
@@ -128,68 +129,68 @@ models:
 
       - name: status
         description: |
-          Estado del loan. Las definiciones de delinquency derivada (combinando
-          status con days_past_due) se calculan en gold.
+          Loan status. Derived delinquency definitions (combining status
+          with days_past_due) are computed in gold.
         tests:
           - not_null
           - accepted_values:
               values: ['current', 'delinquent', 'default', 'paid_off']
 
       - name: currency
-        description: Moneda del loan. ISO 4217.
+        description: Loan currency. ISO 4217.
         tests:
           - not_null
 
       - name: principal
         description: |
-          Monto original del loan. ~2.8% de loans tienen principal NULL en bronze
-          (DQ del generator, mismo patrón que stg_accounts.balance y
-          stg_transactions.amount documentado en decisions.md día 6).
-          Test severity=warn: visible pero no bloquea build.
+          Original loan amount. ~2.8% of loans have NULL principal in bronze
+          (generator DQ, same pattern as stg_accounts.balance and
+          stg_transactions.amount documented in decisions.md day 6).
+          Test severity=warn: visible but does not block the build.
         tests:
           - not_null:
               severity: warn
 
       - name: outstanding_balance
         description: |
-          Balance pendiente del loan. ~2.9% de loans tienen outstanding_balance NULL
-          en bronze (DQ del generator). Test severity=warn.
+          Outstanding loan balance. ~2.9% of loans have NULL outstanding_balance
+          in bronze (generator DQ). Test severity=warn.
         tests:
           - not_null:
               severity: warn
 
       - name: interest_rate
         description: |
-          Tasa de interés anual en escala porcentual (e.g., 19.3 = 19.3%).
-          Preservada en escala original para auditabilidad. Para cálculos 
-          financieros downstream, usar interest_rate_decimal.
-          Puede tener NULLs por DQ del generator. Test severity=warn.
+          Annual interest rate in percentage scale (e.g., 19.3 = 19.3%).
+          Preserved in original scale for auditability. For downstream
+          financial calculations, use interest_rate_decimal.
+          May contain NULLs due to generator DQ. Test severity=warn.
         tests:
           - not_null:
               severity: warn
 
       - name: interest_rate_decimal
         description: |
-          Tasa de interés anual en escala decimal (e.g., 0.193 = 19.3%).
-          Derivada como interest_rate / 100. Usar esta columna en cálculos
-          de gold para evitar errores de escala. Documentado en decisions.md día 9.
+          Annual interest rate in decimal scale (e.g., 0.193 = 19.3%).
+          Derived as interest_rate / 100. Use this column in gold-layer
+          calculations to avoid scale errors. Documented in decisions.md day 9.
         tests:
           - dbt_utils.expression_is_true:
               expression: "= interest_rate / 100.0"
               where: "interest_rate is not null"
 
       - name: days_past_due
-        description: Días de atraso en el pago.
+        description: Days overdue on payment.
         tests:
           - not_null
 
       - name: start_date
-        description: Fecha de inicio del loan.
+        description: Loan start date.
         tests:
           - not_null
 
       - name: end_date
-        description: Fecha de fin del loan (proyectada según term_months).
+        description: Loan end date (projected based on term_months).
         tests:
           - not_null
 

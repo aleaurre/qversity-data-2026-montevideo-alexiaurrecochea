@@ -56,10 +56,10 @@ JDBC_DRIVER = "/opt/spark/jars/postgresql-42.7.3.jar"
 # dbt job constants
 DBT_PROJECT_DIR = "/opt/airflow/dbt"
 
-# Env vars que necesita cualquier spark-submit del proyecto.
-# BashOperator no propaga el env del scheduler por default, así que se lo
-# pasamos explícito. Mantenemos esto en un dict reutilizable para que el
-# factory de tasks no duplique el bloque.
+# Env vars required by every spark-submit invocation in this project.
+# BashOperator does not propagate the scheduler env by default, so we pass
+# it explicitly. Kept in a reusable dict so the task factory below does not
+# duplicate the block.
 SPARK_ENV = {
     "POSTGRES_HOST":     os.getenv("POSTGRES_HOST", "postgres"),
     "POSTGRES_PORT":     os.getenv("POSTGRES_PORT", "5432"),
@@ -69,8 +69,9 @@ SPARK_ENV = {
     "PATH": "/home/airflow/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 }
 
-# Env para dbt. Mismas POSTGRES_* que Spark, profiles.yml las lee con env_var().
-# Idéntica lógica que SPARK_ENV: BashOperator no propaga, lo pasamos explícito.
+# Env for dbt. Same POSTGRES_* vars as Spark; profiles.yml reads them via
+# env_var(). Same rationale as SPARK_ENV: BashOperator does not propagate,
+# we pass it explicitly.
 DBT_ENV = {
     "POSTGRES_HOST":     os.getenv("POSTGRES_HOST", "postgres"),
     "POSTGRES_PORT":     os.getenv("POSTGRES_PORT", "5432"),
@@ -103,19 +104,19 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Helper: build a spark-submit BashOperator for a flatten script.
 #
-# Los 3 flatteners comparten la misma forma de invocación (mismo --jars,
-# mismo --master, mismo env). Lo único que cambia es qué script ejecutan.
-# Usamos un factory para evitar repetir el bloque tres veces — si mañana
-# hay que cambiar la versión del JDBC driver o un flag de spark-submit, se
-# toca en un solo lugar.
+# The 3 flatteners share the same invocation shape (same --jars, same
+# --master, same env). The only thing that changes is which script they
+# execute. We use a factory to avoid repeating the block three times — if
+# tomorrow the JDBC driver version or a spark-submit flag needs to change,
+# it changes in a single place.
 # ---------------------------------------------------------------------------
 def build_flatten_task(script_name: str) -> BashOperator:
     """
     Returns a BashOperator that runs spark-submit on the given script.
 
     Args:
-        script_name: nombre del script sin extensión (ej: "flatten_accounts").
-                     El task_id se deriva del mismo nombre.
+        script_name: script name without extension (e.g. "flatten_accounts").
+                     The task_id is derived from the same name.
     """
     return BashOperator(
         task_id=script_name,
@@ -217,11 +218,11 @@ def qversity_pipeline():
     # -----------------------------------------------------------------------
     # Spark tasks: 3 flatteners in parallel
     # -----------------------------------------------------------------------
-    # Cada uno lee bronze independientemente y escribe su propia staging
-    # table en silver_raw. No hay dependencias entre ellos, así que pueden
-    # ir en paralelo. Para que esto efectivamente paralelice hace falta que
-    # Airflow esté corriendo con LocalExecutor (o superior); con
-    # SequentialExecutor van a ejecutarse uno tras otro igual.
+    # Each one reads bronze independently and writes its own staging table
+    # to silver_raw. There are no dependencies between them, so they can run
+    # in parallel. For this to effectively parallelize, Airflow must be
+    # running with LocalExecutor (or higher); with SequentialExecutor they
+    # will execute one after the other anyway.
     flatten_accounts     = build_flatten_task("flatten_accounts")
     flatten_transactions = build_flatten_task("flatten_transactions")
     flatten_loans        = build_flatten_task("flatten_loans")
@@ -229,38 +230,38 @@ def qversity_pipeline():
     # -----------------------------------------------------------------------
     # dbt tasks: deps → seeds → full project build → full test suite
     # -----------------------------------------------------------------------
-    # Por qué BashOperator y no un operador dbt dedicado:
-    #   - El provider oficial airflow-dbt requiere pinning de versiones y
-    #     setup extra; para un proyecto de 14 días con un único warehouse,
-    #     BashOperator es más simple, más transparente en logs, y permite
-    #     copiar el comando exacto desde la UI de Airflow para reproducir
-    #     manualmente.
-    #   - dbt CLI devuelve exit codes apropiados (no-cero ante test failure
-    #     o error de compilación), así que el task de Airflow falla bien.
+    # Why BashOperator and not a dedicated dbt operator:
+    #   - The official airflow-dbt provider requires version pinning and
+    #     extra setup; for a 14-day project with a single warehouse,
+    #     BashOperator is simpler, more transparent in logs, and allows
+    #     copying the exact command from the Airflow UI to reproduce
+    #     manually.
+    #   - The dbt CLI returns appropriate exit codes (non-zero on test
+    #     failure or compilation error), so the Airflow task fails
+    #     properly.
     #
-    # Por qué pasamos `--profiles-dir` Y la env var DBT_PROFILES_DIR:
-    # redundancia defensiva. Si en algún momento se invoca el comando
-    # fuera de este DAG (debug manual desde shell), el flag explícito
-    # lo hace funcionar sin depender del entorno.
+    # Why we pass both `--profiles-dir` AND the env var DBT_PROFILES_DIR:
+    # defensive redundancy. If at some point the command is invoked outside
+    # this DAG (manual debugging from a shell), the explicit flag makes it
+    # work without depending on the environment.
     #
-    # Por qué dbt_deps corre como una task separada antes de todas las demás:
-    # los paquetes declarados en packages.yml (dbt_utils en nuestro caso)
-    # son requeridos en tiempo de compilación por muchos tests
-    # (relationships, accepted_values, expression_is_true). dbt NO los
-    # instala automáticamente al correr seed/run/test — necesita una
-    # invocación explícita de `dbt deps`. dbt_packages/ NO se commitea
-    # al repo (ignored en .gitignore), así que en un clean clone hace
-    # falta este paso.
+    # Why dbt_deps runs as a separate task before everything else:
+    # the packages declared in packages.yml (dbt_utils in our case) are
+    # required at compile time by many tests (relationships,
+    # accepted_values, expression_is_true). dbt does NOT install them
+    # automatically when running seed/run/test — it requires an explicit
+    # `dbt deps` invocation. dbt_packages/ is NOT committed to the repo
+    # (ignored in .gitignore), so a clean clone needs this step.
     #
-    # Por qué dbt_seed corre como una task separada antes de dbt_run:
-    # los seeds (CSVs en dbt/seeds/: fx_rates, country_currency) son inputs
-    # estáticos que varios modelos joinean. dbt NO los carga como parte de
-    # `dbt run` — necesita una invocación explícita de `dbt seed`. Es
-    # idempotente: si los seeds ya existen, los recrea con el mismo
-    # contenido del CSV.
+    # Why dbt_seed runs as a separate task before dbt_run:
+    # the seeds (CSVs in dbt/seeds/: fx_rates, country_currency) are static
+    # inputs joined by several models. dbt does NOT load them as part of
+    # `dbt run` — it requires an explicit `dbt seed` invocation. It is
+    # idempotent: if the seeds already exist, they are recreated with the
+    # same content from the CSV.
     #
-    # Sin `--select`: dbt corre TODO el proyecto (3 stg + 7 dim + 2 fct +
-    # 1 agg + 3 int + 18 marts = 34 modelos, ~434 tests).
+    # No `--select`: dbt runs the ENTIRE project (3 stg + 7 dim + 2 fct +
+    # 1 agg + 3 int + 18 marts = 34 models, ~434 tests).
     dbt_deps = BashOperator(
         task_id="dbt_deps",
         bash_command=(
@@ -312,14 +313,14 @@ def qversity_pipeline():
     # -----------------------------------------------------------------------
     # Dependencies
     # -----------------------------------------------------------------------
-    # Pipeline completo:
-    #   ensure → download → load → [3 flatteners en paralelo]
+    # Full pipeline:
+    #   ensure → download → load → [3 flatteners in parallel]
     #         → dbt_deps → dbt_seed → dbt_run → dbt_test
     #
-    # Por qué dbt_run >> dbt_test (secuencial) en lugar de paralelo:
-    # los tests aseveran sobre el output del run. Correrlos en paralelo
-    # haría race sobre la creación de las tablas. El costo de serializar
-    # dos tasks de ~5s es cero.
+    # Why dbt_run >> dbt_test (sequential) instead of parallel:
+    # tests assert on the output of run. Running them in parallel would
+    # race on table creation. The cost of serializing two ~5s tasks is
+    # zero.
     ensure = ensure_bronze_table()
     local_path = download_from_s3()
     loaded = load_to_bronze(local_path)
