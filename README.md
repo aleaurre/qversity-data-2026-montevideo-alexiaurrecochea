@@ -72,7 +72,7 @@ single `docker compose up -d --build`.
 | Docker Engine         | 24.x            | with Compose v2 plugin (`docker compose ...`) |
 | RAM available to Docker | ≥ 8 GB        | PySpark + Airflow + Postgres comfortably |
 | Disk free             | ≥ 5 GB          | images, postgres data volume, dataset |
-| Power BI Desktop      | latest          | Windows only; needed to open `powerbi/dashboard.pbix` |
+| Power BI Desktop      | latest          | Windows only; needed to open `powerbi/qversity-dashboard.pbix` |
 | Outbound internet     | required        | for the S3 dataset and the JDBC driver download |
 
 No local Python, dbt, Spark or Java installation is required: every tool
@@ -161,7 +161,7 @@ container on the loopback interface.
 | Schema    | `gold` |
 | Auth      | Database, with the `POSTGRES_USER` / `POSTGRES_PASSWORD` from `.env` |
 
-Open `powerbi/dashboard.pbix` and refresh once. Pre-rendered screenshots
+Open `powerbi/qversity-dashboard.pbix` and refresh once. Pre-rendered screenshots
 live in `powerbi/screenshots/`.
 
 ### 3.6 Tear down
@@ -237,6 +237,16 @@ docker compose down -v           # ALSO drops the postgres volume — start fres
 | Warehouse | **PostgreSQL 15** | Required by the spec; JSONB, generated columns and rich indexing handle this dataset effortlessly. |
 | BI | **Power BI Desktop** | Required by the spec; connects via the native PostgreSQL connector. |
 | Packaging | **Docker Compose** | A single `up -d --build` reproduces the entire pipeline on any laptop with Docker. No local Python/Java/JDBC needed. |
+
+> **Note on testing strategy.** The project ships with 434 schema tests
+> defined inline in the `.yml` files alongside their models (`unique`,
+> `not_null`, `accepted_values`, `relationships`, and
+> `dbt_utils.expression_is_true`). No singular SQL tests are used: every
+> data quality assertion in this project expresses naturally as a schema
+> test, which keeps the test colocated with the column it asserts on and
+> makes the YAML the single source of truth for test coverage. The
+> `dbt/tests/` directory listed in the project brief structure is
+> therefore intentionally not present.
 
 ### Layer responsibilities (the three-level split)
 

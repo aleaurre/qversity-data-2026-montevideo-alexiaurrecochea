@@ -216,10 +216,10 @@ docker exec qversity_airflow_scheduler bash -c `
 
 ## Power BI
 
-### [ ] `powerbi/dashboard.pbix` exists, connected to gold schema
+### [ ] `powerbi/qversity-dashboard.pbix` exists, connected to gold schema
 
 ```powershell
-Test-Path powerbi/dashboard.pbix
+Test-Path powerbi/qversity-dashboard.pbix
 ```
 
 In Power BI Desktop, open the file → Transform data → Data source settings
