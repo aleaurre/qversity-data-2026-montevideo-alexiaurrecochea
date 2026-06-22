@@ -26,7 +26,7 @@ from pyspark.sql.types import (
     StructType,
 )
 
-from utils import deduplicate_by_pk, get_jdbc_config, get_spark_session, TARGET_SCHEMA
+from dbt.src.flatten.utils import deduplicate_by_pk, get_jdbc_config, get_spark_session, TARGET_SCHEMA
 
 
 # Schema explícito del array `transactions[]`.

@@ -24,7 +24,7 @@ from pyspark.sql.types import (
 
 # Importamos desde el mismo directorio. spark-submit agrega el dir del script
 # al sys.path automáticamente, así que `from utils import ...` funciona.
-from utils import get_spark_session, get_jdbc_config, deduplicate_by_pk, TARGET_SCHEMA
+from dbt.src.flatten.utils import get_spark_session, get_jdbc_config, deduplicate_by_pk, TARGET_SCHEMA
 
 
 # Schema explícito del array `accounts[]`.

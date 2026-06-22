@@ -1,22 +1,17 @@
 {#
     Override of dbt's default `generate_schema_name`.
 
-    Default behavior (when a model has +schema: bronze):
-        target_schema = "public" (from profiles.yml)
-        custom_schema = "bronze" (from dbt_project.yml +schema config)
-        -> dbt writes to "public_bronze"
+    UNCHANGED from the Postgres version — this is pure Jinja, adapter-agnostic.
+    It works identically on dbt-databricks.
 
-    What we want for this project:
-        -> dbt writes to "bronze" (no prefix)
+    Behavior: if a model sets +schema (e.g. silver / gold), use it as-is
+    (no `<target_schema>_` prefix). Otherwise fall back to target.schema.
 
-    Reason: Spark already writes to `silver.stg_accounts`, `silver.stg_transactions`,
-    `silver.stg_loans` directly. If dbt prefixed schemas as `public_silver`, dbt
-    sources couldn't reference the Spark-produced tables without manual schema
-    overrides on every source. Cleaner to use unprefixed schemas everywhere.
-
-    Rule implemented here:
-        - If a model has a custom_schema_name set (+schema), use it as-is.
-        - Otherwise, fall back to the target schema from profiles.yml.
+    Unity Catalog note: this macro resolves the SCHEMA only. The CATALOG comes
+    from profiles.yml (`catalog: qversity`). So a gold model resolves to
+    `qversity.gold.<model>` — same medallion layout as Postgres, now as a
+    3-level UC name. No generate_database_name override is needed because the
+    whole project lives in a single catalog.
 
     Reference: https://docs.getdbt.com/docs/build/custom-schemas
 #}

@@ -5,30 +5,21 @@
 }}
 
 /*
-    silver.stg_transactions
-    -----------------------
-    Staging view over silver_raw.stg_transactions (produced by PySpark's
-    flatten_transactions.py).
+    silver.stg_transactions  — versión Databricks.
 
-    Responsibilities:
-      - Defensive trim on text fields.
-      - Date parsing via parse_date_multi_format macro (handles 4 formats
-        from the source: ISO, compact, slash-DMY, dash-MDY).
-      - Semantic normalization of categoricals via macros:
-          * transaction_type -> normalize_transaction_type (casing + Spanish)
-          * status           -> normalize_transaction_status (casing only)
-          * category         -> normalize_transaction_category (casing + NULL-eo
-                                of '', 'NA', 'N/A', 'null' missing markers)
-          * channel          -> normalize_casing inline (5 canonicals already
-                                clean in EDA, defensive only)
-      - currency kept as-is (ISO 4217 uppercase canonical).
-      - merchant, description: trim only (free-text fields, no normalization).
-      - amount kept as double precision; financial-grade numeric casts done
-        in downstream gold marts where the grain is known.
+    Conversión casi 1:1 desde la versión Postgres. Por qué tan poco cambia:
+    este staging NO toca JSONB — el flatten de JSONB->columnas ya ocurrió en
+    el notebook PySpark (silver_raw.stg_transactions). Acá solo hay trim, casts
+    y normalización semántica vía macros, todo SQL estándar que Spark soporta.
 
-    Grain: 1 row per transaction (transaction_id is unique within latest load).
+    Lo único que cambia respecto al original:
+      - upper(trim()), trim(): idénticos en Spark SQL.
+      - parse_date_multi_format: misma firma, internamente ya usa el dialecto
+        Spark (try_to_date + rlike).
+      - normalize_*: idénticos (lower/trim + CASE), portan sin cambios.
+      - source(): resuelve a qversity.silver_raw.stg_transactions vía _sources.yml.
 
-    Materialization: view. Downstream silver dims/facts join through this.
+    Grain: 1 fila por transacción. Materialización: view.
 */
 
 with source as (

@@ -1,0 +1,113 @@
+# =============================================================================
+# Databricks Asset Bundle (DAB) for the Qversity fintech pipeline.
+#
+# This file is the Databricks equivalent of the old `docker-compose.yml`:
+# it is the single source of truth that reproduces the whole pipeline on any
+# workspace. Instead of `docker compose up`, you run:
+#
+#     databricks bundle deploy -t dev      # provision job + resources
+#     databricks bundle run qversity_pipeline -t dev
+#
+# Target environment: Databricks Free Edition (serverless-only, Unity Catalog).
+#   - No job_clusters: Free Edition has no classic compute. Notebook tasks run
+#     on serverless; the dbt task runs against a serverless SQL Warehouse.
+#   - 3-level namespace: catalog.schema.table. We use ONE catalog (`qversity`)
+#     with schemas bronze / silver_raw / silver / gold — same medallion layout
+#     as the Postgres version, now governed by Unity Catalog.
+#
+# The DAG dependency chain is preserved 1:1:
+#   ingest_bronze
+#     -> [flatten_accounts, flatten_transactions, flatten_loans]  (parallel)
+#       -> dbt_build  (deps -> seed -> run -> test)
+# =============================================================================
+
+bundle:
+  name: qversity-data-databricks
+
+variables:
+  catalog:
+    description: Unity Catalog catalog that holds all four schemas.
+    default: qversity
+  source_url:
+    description: Public S3 URL of the source JSON (no auth, same bucket as the original project).
+    default: "https://REPLACE-ME-with-your-public-s3-url/fintech_banking_dataset.json"
+  warehouse_id:
+    description: ID of the serverless SQL Warehouse the dbt task runs against.
+    default: "REPLACE-ME-with-your-warehouse-id"
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      # Your Free Edition workspace URL, e.g. https://dbc-xxxxxxxx-xxxx.cloud.databricks.com
+      host: "https://REPLACE-ME.cloud.databricks.com"
+
+resources:
+  jobs:
+    qversity_pipeline:
+      name: qversity_pipeline
+
+      # Serverless task environment for the Python notebook tasks. Free Edition
+      # provides serverless compute automatically; this block pins the
+      # serverless environment version used by the notebook tasks.
+      environments:
+        - environment_key: serverless_default
+          spec:
+            client: "3"
+
+      tasks:
+        # ---- Ingestion: public S3 JSON -> UC Volume -> bronze Delta table ----
+        - task_key: ingest_bronze
+          notebook_task:
+            notebook_path: ./src/ingestion/01_ingest_bronze.py
+            base_parameters:
+              catalog: ${var.catalog}
+              source_url: ${var.source_url}
+          environment_key: serverless_default
+
+        # ---- Flatten the three nested arrays (run in parallel) --------------
+        - task_key: flatten_accounts
+          depends_on:
+            - task_key: ingest_bronze
+          notebook_task:
+            notebook_path: ./src/flatten/flatten_accounts.py
+            base_parameters:
+              catalog: ${var.catalog}
+          environment_key: serverless_default
+
+        - task_key: flatten_transactions
+          depends_on:
+            - task_key: ingest_bronze
+          notebook_task:
+            notebook_path: ./src/flatten/flatten_transactions.py
+            base_parameters:
+              catalog: ${var.catalog}
+          environment_key: serverless_default
+
+        - task_key: flatten_loans
+          depends_on:
+            - task_key: ingest_bronze
+          notebook_task:
+            notebook_path: ./src/flatten/flatten_loans.py
+            base_parameters:
+              catalog: ${var.catalog}
+          environment_key: serverless_default
+
+        # ---- dbt: deps -> seed -> run -> test (one task, ordered commands) --
+        - task_key: dbt_build
+          depends_on:
+            - task_key: flatten_accounts
+            - task_key: flatten_transactions
+            - task_key: flatten_loans
+          dbt_task:
+            project_directory: ./dbt
+            profiles_directory: ./dbt
+            catalog: ${var.catalog}
+            schema: silver
+            warehouse_id: ${var.warehouse_id}
+            commands:
+              - "dbt deps"
+              - "dbt seed --target dev"
+              - "dbt run --target dev"
+              - "dbt test --target dev"

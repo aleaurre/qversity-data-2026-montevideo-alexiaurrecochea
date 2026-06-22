@@ -1,52 +1,32 @@
-# dbt profiles for Qversity.
+# dbt profiles for Qversity — Databricks (dbt-databricks adapter).
 #
-# This file lives inside the repo on purpose: it documents how dbt connects
-# to the warehouse, and CI / reviewers can run `dbt run --profiles-dir ./dbt`
-# without copying anything to their home directory.
+# Reemplaza el profile postgres. Vive dentro del repo para que CI/revisores
+# corran `dbt run --profiles-dir ./dbt` sin copiar nada.
 #
-# All sensitive values are read from environment variables via `env_var()`.
-# The defaults are SAFE non-secrets and the .env file (gitignored) provides
-# the real values. Order of resolution at runtime:
+# Free Edition: dbt se conecta a un SQL Warehouse serverless vía http_path.
+# Todos los secretos salen de env vars; los defaults NO son secretos.
 #
-#   1. POSTGRES_* env vars from .env -> docker-compose -> airflow container
-#   2. If a var is missing, env_var() raises and dbt fails fast (good).
+# Cómo obtener los valores (Free Edition):
+#   host       -> URL del workspace, sin https:// (ej. dbc-xxxx.cloud.databricks.com)
+#   http_path  -> SQL Warehouses -> tu warehouse -> Connection details -> HTTP Path
+#                 (forma: /sql/1.0/warehouses/<warehouse_id>)
+#   token      -> Settings -> Developer -> Access tokens -> Generate new token
+#   catalog    -> qversity   (el catálogo de Unity Catalog que crea la ingesta)
 #
-# `host` defaults to "postgres" — the service name of the Postgres container
-# in docker-compose. From inside the airflow container, that's the hostname
-# Docker's DNS resolves. From the host machine you'd override POSTGRES_HOST
-# to "localhost" when running dbt outside the container.
+# Nota sobre el namespace de 3 niveles de Unity Catalog:
+#   En dbt-databricks `catalog` = el catálogo UC (lo que en Postgres era `dbname`).
+#   `schema` sigue siendo el schema por defecto; el macro generate_schema_name
+#   + el +schema de dbt_project.yml resuelven bronze/silver/gold igual que antes.
 
 qversity:
   target: dev
   outputs:
 
     dev:
-      type: postgres
-      host: "{{ env_var('POSTGRES_HOST', 'postgres') }}"
-      port: "{{ env_var('POSTGRES_PORT', '5432') | int }}"
-      user: "{{ env_var('POSTGRES_USER') }}"
-      password: "{{ env_var('POSTGRES_PASSWORD') }}"
-      dbname: "{{ env_var('POSTGRES_DB', 'qversity') }}"
-
-      # The default schema dbt writes to. Combined with the custom
-      # generate_schema_name macro and the +schema config in dbt_project.yml,
-      # actual schemas resolved per layer become: bronze, silver, gold.
-      # (Without the macro, dbt would prefix them as
-      # `<schema>_bronze`, `<schema>_silver`, etc.)
-      schema: "{{ env_var('DBT_SCHEMA', 'public') }}"
-
-      # Connection tuning. 4 threads is plenty for a single-node dev box
-      # with ~30 models total. If we ever hit Postgres connection limits
-      # we lower this; if we want faster runs in CI we raise it.
+      type: databricks
+      host: "{{ env_var('DATABRICKS_HOST') }}"          # dbc-xxxx.cloud.databricks.com
+      http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}" # /sql/1.0/warehouses/<id>
+      token: "{{ env_var('DATABRICKS_TOKEN') }}"
+      catalog: "{{ env_var('DATABRICKS_CATALOG', 'qversity') }}"
+      schema: "{{ env_var('DBT_SCHEMA', 'silver') }}"
       threads: 4
-
-      # Keepalives matter when dbt is invoked by Airflow: long-running
-      # transformations can otherwise be killed by intermediate proxies
-      # or by Docker's default tcp_keepalive settings.
-      keepalives_idle: 0
-
-      # Search path: ensures unqualified table references resolve to the
-      # layered schemas in the expected order. dbt itself always
-      # fully-qualifies, but ad-hoc queries from `dbt run-operation` or
-      # macros benefit from this.
-      search_path: "bronze,silver,gold,public"
