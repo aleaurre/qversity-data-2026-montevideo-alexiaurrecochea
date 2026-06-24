@@ -10,7 +10,7 @@
 # MAGIC %run ./utils
 
 # COMMAND ----------
-dbutils.widgets.text("catalog", "qversity")
+dbutils.widgets.text("catalog", "workspace")
 CATALOG = dbutils.widgets.get("catalog")
 
 # COMMAND ----------
