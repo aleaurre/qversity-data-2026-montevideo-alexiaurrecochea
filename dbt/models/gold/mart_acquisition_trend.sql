@@ -30,7 +30,7 @@
 with monthly_acquisitions as (
 
     select
-        date_trunc('month', registration_date)::date as month,
+        trunc(registration_date, 'MONTH') as month,
         count(distinct customer_id) as new_customers
     from {{ ref('dim_customer') }}
     where registration_date is not null
@@ -42,9 +42,9 @@ with_running_total as (
 
     select
         month,
-        extract(year  from month)::int  as year,
-        extract(month from month)::int  as month_number,
-        to_char(month, 'YYYY-MM')       as month_label,
+        cast(year(month) as int)   as year,
+        cast(month(month) as int)  as month_number,
+        date_format(month, 'yyyy-MM') as month_label,
         new_customers,
         sum(new_customers) over (
             order by month
@@ -67,7 +67,7 @@ final as (
         case
             when prev_month_customers is null or prev_month_customers = 0 then null
             else round(
-                ((new_customers - prev_month_customers)::numeric / prev_month_customers) * 100,
+                (cast(new_customers - prev_month_customers as double) / prev_month_customers) * 100,
                 2
             )
         end as mom_growth_pct

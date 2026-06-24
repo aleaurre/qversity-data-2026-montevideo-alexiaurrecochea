@@ -71,10 +71,10 @@ aggregated as (
         merchant,
         currency,
         count(*)                                    as tx_count,
-        round(sum(amount)::numeric, 2)              as total_value,
-        round(avg(amount)::numeric, 2)              as avg_ticket,
-        round(min(amount)::numeric, 2)              as min_ticket,
-        round(max(amount)::numeric, 2)              as max_ticket
+        round(coalesce(sum(amount), 0), 2)          as total_value,
+        round(coalesce(avg(amount), 0), 2)          as avg_ticket,
+        round(coalesce(min(amount), 0), 2)          as min_ticket,
+        round(coalesce(max(amount), 0), 2)          as max_ticket
     from completed_tx
     group by merchant, currency
 

@@ -27,10 +27,10 @@ select
     currency,
     
     count(*) as loan_count,
-    sum(principal)                as total_principal,
-    sum(outstanding_balance)      as total_outstanding_balance,
-    avg(outstanding_balance)      as avg_outstanding_balance,
-    
+    coalesce(sum(principal), 0)           as total_principal,
+    coalesce(sum(outstanding_balance), 0) as total_outstanding_balance,
+    coalesce(avg(outstanding_balance), 0) as avg_outstanding_balance,
+
     -- Interest metrics (uses decimal scale, Day 9 fix)
     avg(interest_rate_decimal)    as avg_interest_rate,
     sum(monthly_interest_accrued) as total_monthly_interest_accrued,
