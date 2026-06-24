@@ -78,7 +78,7 @@ SELECT
 
     -- Derived (sintácticas, no de negocio)
     (status = 'failed')                    AS is_failed,
-    EXTRACT(DOW FROM transaction_date)::int AS day_of_week,
+    cast(dayofweek(transaction_date) - 1 as int) AS day_of_week,
 
     -- Lineage / auditoría
     bronze_id,

@@ -122,7 +122,7 @@ fees_by_customer as (
     -- See decisions.md Day 9 on temporal consistency.
     select
         a.customer_id,
-        round(sum(t.amount)::numeric, 2) as total_fees_paid_lifetime
+        round(cast(sum(t.amount) as double), 2) as total_fees_paid_lifetime
     from {{ ref('fct_transactions') }} as t
     inner join {{ ref('dim_account') }} as a
         on t.account_id = a.account_id
@@ -140,7 +140,7 @@ interest_by_customer as (
     -- (percent scale). See decisions.md Day 9.
     select
         customer_id,
-        round(sum(outstanding_balance * interest_rate_decimal / 12)::numeric, 2)
+        round(cast(sum(outstanding_balance * interest_rate_decimal / 12) as double), 2)
             as monthly_interest_income
     from {{ ref('fct_loans') }}
     where status in ('current', 'delinquent')
@@ -203,7 +203,7 @@ final as (
         -- customers with tenure 1-2 months. See decisions.md Day 11.
         round(
             (coalesce(f.total_fees_paid_lifetime, 0) /
-             greatest(c.tenure_months, 3))::numeric,
+            greatest(c.tenure_months, 3)),
             2
         ) as monthly_fee_revenue,
 
@@ -213,7 +213,7 @@ final as (
         -- Fee component uses same clamp as monthly_fee_revenue above.
         round(
             (coalesce(f.total_fees_paid_lifetime, 0) /
-             greatest(c.tenure_months, 3))::numeric,
+            greatest(c.tenure_months, 3)),
             2
         ) + coalesce(i.monthly_interest_income, 0) as total_revenue_monthly
 

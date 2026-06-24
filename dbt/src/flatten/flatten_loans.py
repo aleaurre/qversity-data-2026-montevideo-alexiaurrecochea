@@ -26,11 +26,11 @@ LOAN_SCHEMA = StructType([
     StructField("loan_id",             StringType(),  nullable=False),
     StructField("type",                StringType(),  nullable=True),   # -> loan_type
     StructField("currency",            StringType(),  nullable=True),
-    StructField("principal",           DoubleType(),  nullable=True),
-    StructField("outstanding_balance", DoubleType(),  nullable=True),
-    StructField("interest_rate",       DoubleType(),  nullable=True),
+    StructField("principal",           StringType(), nullable=True),
+    StructField("outstanding_balance", StringType(), nullable=True),
+    StructField("monthly_payment",     StringType(), nullable=True),
+    StructField("interest_rate",       StringType(), nullable=True),
     StructField("term_months",         IntegerType(), nullable=True),   # <-- FIX: faltaba
-    StructField("monthly_payment",     DoubleType(),  nullable=True),
     StructField("start_date",          StringType(),  nullable=True),   # parseado en dbt
     StructField("end_date",            StringType(),  nullable=True),   # parseado en dbt
     StructField("status",              StringType(),  nullable=True),
@@ -76,6 +76,13 @@ def flatten_loans(bronze_df: DataFrame) -> DataFrame:
         col("bronze_id"),
         col("load_timestamp"),
     )
+
+    from pyspark.sql.functions import regexp_replace
+    for num_col in ["principal", "outstanding_balance", "monthly_payment", "interest_rate"]:
+        flat = flat.withColumn(
+            num_col,
+            regexp_replace(col(num_col), r"[^0-9.\-]", "").cast(DoubleType())
+        )
 
     string_cols = ["customer_id", "loan_id", "loan_type", "currency",
                    "status", "collateral_type"]

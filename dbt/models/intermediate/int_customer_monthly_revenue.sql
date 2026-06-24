@@ -118,7 +118,7 @@ final as (
 
         -- ---------- Lifetime fee revenue (kept for auditability) ----------
         -- Native: rounded (display-grain, single customer)
-        coalesce(round(f.fee_revenue_lifetime_native::numeric, 2), 0)
+        coalesce(round(f.fee_revenue_lifetime_native, 2), 0)
             as total_fees_paid_lifetime_native,
         -- USD: full precision (downstream AVG over segment requires it)
         coalesce(f.fee_revenue_lifetime_usd, 0)
@@ -128,7 +128,7 @@ final as (
         -- Native: rounded
         coalesce(
             round(
-                (f.fee_revenue_lifetime_native / nullif(c.tenure_months, 0))::numeric,
+                (f.fee_revenue_lifetime_native / nullif(c.tenure_months, 0)),
                 2
             ),
             0
@@ -141,7 +141,7 @@ final as (
 
         -- ---------- Monthly interest revenue ----------
         -- Native: rounded
-        coalesce(round(i.monthly_interest_revenue_native::numeric, 2), 0)
+        coalesce(round(i.monthly_interest_revenue_native, 2), 0)
             as monthly_interest_revenue_native,
         -- USD: full precision
         coalesce(i.monthly_interest_revenue_usd, 0)
@@ -151,11 +151,11 @@ final as (
         -- Native: sum of rounded components
         coalesce(
             round(
-                (f.fee_revenue_lifetime_native / nullif(c.tenure_months, 0))::numeric,
+                (f.fee_revenue_lifetime_native / nullif(c.tenure_months, 0)),
                 2
             ),
             0
-        ) + coalesce(round(i.monthly_interest_revenue_native::numeric, 2), 0)
+        ) + coalesce(round(i.monthly_interest_revenue_native, 2), 0)
             as total_monthly_revenue_native,
         -- USD: sum of full-precision components
         coalesce(
