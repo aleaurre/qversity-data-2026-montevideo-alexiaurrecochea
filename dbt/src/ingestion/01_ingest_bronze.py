@@ -21,8 +21,8 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "qversity")
-dbutils.widgets.text("source_url", "")
+dbutils.widgets.text("catalog", "workspace")
+dbutils.widgets.text("source_url", "https://qversity-raw-public-data.s3.amazonaws.com/fintech_banking_dataset.json")
 
 CATALOG = dbutils.widgets.get("catalog")
 SOURCE_URL = dbutils.widgets.get("source_url")
@@ -36,7 +36,7 @@ LANDING_PATH = f"/Volumes/{CATALOG}/{BRONZE_SCHEMA}/landing/fintech_banking_data
 
 # --- 0. Catalog + schemas + landing volume (idempotente) ---------------------
 # Equivale a tu scripts/init_db.sql: crea la estructura medallion al arrancar.
-spark.sql(f"CREATE CATALOG IF NOT EXISTS {CATALOG}")
+# spark.sql(f"CREATE CATALOG IF NOT EXISTS {CATALOG}")
 for sch in ("bronze", "silver_raw", "silver", "gold"):
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{sch}")
 spark.sql(f"CREATE VOLUME IF NOT EXISTS {VOLUME}")
