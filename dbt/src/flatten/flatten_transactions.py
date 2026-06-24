@@ -24,7 +24,7 @@ TRANSACTION_SCHEMA = StructType([
     StructField("transaction_id", StringType(), nullable=False),
     StructField("account_id",     StringType(), nullable=True),
     StructField("date",           StringType(), nullable=True),  # -> transaction_date
-    StructField("amount",         DoubleType(), nullable=True),
+    StructField("amount", StringType(), nullable=True),  # viene como string en el JSON
     StructField("currency",       StringType(), nullable=True),
     StructField("type",           StringType(), nullable=True),
     StructField("category",       StringType(), nullable=True),
@@ -70,6 +70,8 @@ def flatten_transactions(bronze_df: DataFrame) -> DataFrame:
         col("bronze_id"),
         col("load_timestamp"),
     )
+
+    flat = flat.withColumn("amount", col("amount").cast(DoubleType()))
 
     string_cols = ["customer_id", "transaction_id", "account_id", "currency",
                    "transaction_type", "category", "merchant", "channel",
