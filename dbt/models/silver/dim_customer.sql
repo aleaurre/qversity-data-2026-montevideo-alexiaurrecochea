@@ -6,65 +6,16 @@
 }}
 
 /*
-    silver.dim_customer
-    -------------------
-    One row per customer. Extracts flat customer fields from
-    bronze.raw_fintech_data, deduplicates, casts to proper types, normalizes
-    categorical values, validates geographic coordinates, and enriches with
-    derived dimensions (age, age_bucket, tenure_months, tenure_bucket).
-
-    -----------------------------------------------------------------------
-    DEDUP STRATEGY
-    -----------------------------------------------------------------------
-    The bronze layer uses append-with-load_id semantics: each DAG run inserts
-    a fresh batch of records, all tagged with the same UUID load_id. EDA on
-    day 1 found ~100 customer_id duplicates within a single batch (likely a
-    generator bug). We deduplicate by `customer_id` keeping the most recent
-    `load_timestamp` — this also handles the future case of re-runs producing
-    multiple batches.
-
-    Why dedup here in dbt and not in Spark like accounts/transactions/loans:
-    customer is the root of the JSON record, not an array. A Spark script
-    would not actually flatten anything — only dedup — which Postgres handles
-    trivially via ROW_NUMBER() at 5k-row scale. Documented in decisions.md
-    under "Refined Spark vs dbt responsibility split".
-
-    -----------------------------------------------------------------------
-    DATE FORMAT NOTE (discovered in EDA, day 5)
-    -----------------------------------------------------------------------
-    The source dataset uses FOUR different date string formats in both
-    `date_of_birth` and `registration_date`. Each format AND locale was
-    validated empirically before deciding the parser:
-
-      Format               Locale  Example      Approx share  How confirmed
-      -------------------  ------  -----------  ------------  --------------------------------
-      ISO YYYY-MM-DD       n/a     1950-05-08   ~82%          unambiguous
-      Slash DD/MM/YYYY     DMY     26/04/1975   ~6%           found rows with first comp > 12,
-                                                              none with second > 12 -> DMY
-      Dash  MM-DD-YYYY     MDY     06-13-2024   ~6%           a row with "06-13-..." disproved
-                                                              the DMY hypothesis (no month 13);
-                                                              so dash = MDY (US locale)
-      Compact YYYYMMDD     n/a     19500509     ~6%           unambiguous
-
-    Strategy: detect format by regex, apply TO_DATE() with matching pattern,
-    NULL on unknown formats. Custom test below flags excessive NULL rates.
-
-    -----------------------------------------------------------------------
-    GEO VALIDATION
-    -----------------------------------------------------------------------
-    EDA found 340 of 5000 customers (6.8%) have lat/lon outside valid ranges
-    ([-90, 90] for lat, [-180, 180] for lon). Treatment: NULL the invalid
-    coordinates AND emit an `is_geo_valid` boolean flag. This preserves the
-    customer record (no row loss) while making the data quality issue
-    queryable from downstream models.
-
-    -----------------------------------------------------------------------
-    STATUS NORMALIZATION
-    -----------------------------------------------------------------------
-    Customer.status has 20 surface variants across 4 canonical values
-    (active / inactive / suspended / closed). Casing chaos + Spanish
-    translations. Normalized via `normalize_customer_status` macro.
-    See decisions.md for full mapping.
+    silver.dim_customer — versión Databricks (Spark SQL).
+    Conversiones vs Postgres:
+      - data ->> 'x'            -> get_json_object(data, '$.x')
+      - (x)::text               -> (drop; get_json_object ya devuelve string)
+      - nullif(x,'')::numeric   -> cast(nullif(x,'') as double)
+      - age(current_date, d)    -> months_between(current_date(), d)
+        * años:  floor(months_between(...) / 12)
+        * meses: floor(months_between(...))
+    Las macros normalize_* y la validación geo son SQL estándar; no cambian.
+    Las fechas usan parse_date_multi_format (ya convertido).
 */
 
 with bronze_dedup as (
@@ -73,11 +24,11 @@ with bronze_dedup as (
         data,
         load_timestamp,
         row_number() over (
-            partition by data ->> 'customer_id'
+            partition by get_json_object(data, '$.customer_id')
             order by load_timestamp desc
         ) as rn
     from {{ source('bronze', 'raw_fintech_data') }}
-    where data ->> 'customer_id' is not null
+    where get_json_object(data, '$.customer_id') is not null
 
 ),
 
@@ -85,37 +36,32 @@ flat as (
 
     select
         -- ---------- Identity ----------
-        (data ->> 'customer_id')::text         as customer_id,
-        (data ->> 'first_name')::text          as first_name,
-        (data ->> 'last_name')::text           as last_name,
-        (data ->> 'email')::text               as email,
-        (data ->> 'phone_number')::text        as phone_number,
+        get_json_object(data, '$.customer_id')    as customer_id,
+        get_json_object(data, '$.first_name')     as first_name,
+        get_json_object(data, '$.last_name')      as last_name,
+        get_json_object(data, '$.email')          as email,
+        get_json_object(data, '$.phone_number')   as phone_number,
 
         -- ---------- Demographics ----------
-        {{ parse_date_multi_format("data ->> 'date_of_birth'") }} as date_of_birth,
-
-        (data ->> 'gender')::text              as gender,
-        (data ->> 'nationality')::text         as nationality,
-        (data ->> 'city')::text                as city,
-        (data ->> 'country')::text             as country,
-        (data ->> 'address')::text             as address,
+        {{ parse_date_multi_format("get_json_object(data, '$.date_of_birth')") }} as date_of_birth,
+        get_json_object(data, '$.gender')         as gender,
+        get_json_object(data, '$.nationality')    as nationality,
+        get_json_object(data, '$.city')           as city,
+        get_json_object(data, '$.country')        as country,
+        get_json_object(data, '$.address')        as address,
 
         -- ---------- Geo (raw, validated below) ----------
-        nullif(data ->> 'lat', '')::numeric    as lat_raw,
-        nullif(data ->> 'lon', '')::numeric    as lon_raw,
+        cast(nullif(get_json_object(data, '$.lat'), '') as double) as lat_raw,
+        cast(nullif(get_json_object(data, '$.lon'), '') as double) as lon_raw,
 
         -- ---------- Relationship & status ----------
-        -- registration_date: same multi-format treatment as date_of_birth.
-        -- ---------- Relationship & status ----------
-        {{ parse_date_multi_format("data ->> 'registration_date'") }} as registration_date,
+        {{ parse_date_multi_format("get_json_object(data, '$.registration_date')") }} as registration_date,
+        get_json_object(data, '$.kyc_status')            as kyc_status,
+        cast(nullif(get_json_object(data, '$.risk_score'), '') as double) as risk_score,
+        get_json_object(data, '$.customer_segment')      as customer_segment,
+        get_json_object(data, '$.relationship_manager')  as relationship_manager,
+        get_json_object(data, '$.status')                as status_raw,
 
-        (data ->> 'kyc_status')::text              as kyc_status,
-        nullif(data ->> 'risk_score', '')::numeric as risk_score,
-        (data ->> 'customer_segment')::text        as customer_segment,
-        (data ->> 'relationship_manager')::text    as relationship_manager,
-        (data ->> 'status')::text                  as status_raw,
-
-        -- ---------- Audit ----------
         load_timestamp
 
     from bronze_dedup
@@ -126,7 +72,6 @@ flat as (
 enriched as (
 
     select
-        -- ---------- Identity ----------
         customer_id,
         first_name,
         last_name,
@@ -137,9 +82,17 @@ enriched as (
         date_of_birth,
         case
             when date_of_birth is null then null
-            else extract(year from age(current_date, date_of_birth))::int
+            else cast(floor(months_between(current_date(), date_of_birth) / 12) as int)
         end as age,
-        {{ age_bucket('date_of_birth') }} as age_bucket,
+        case
+            when date_of_birth is null then 'unknown'
+            when floor(months_between(current_date(), date_of_birth) / 12) < 18 then 'under_18'
+            when floor(months_between(current_date(), date_of_birth) / 12) <= 25 then '18-25'
+            when floor(months_between(current_date(), date_of_birth) / 12) <= 35 then '26-35'
+            when floor(months_between(current_date(), date_of_birth) / 12) <= 50 then '36-50'
+            when floor(months_between(current_date(), date_of_birth) / 12) <= 65 then '51-65'
+            else '65+'
+        end as age_bucket,
 
         gender,
         nationality,
@@ -148,25 +101,22 @@ enriched as (
         address,
 
         -- ---------- Geo (validated) ----------
-        -- Coordinates outside valid lat/lon ranges are nulled out and flagged.
         case
             when lat_raw is null or lon_raw is null then false
             when lat_raw < -90  or lat_raw > 90     then false
             when lon_raw < -180 or lon_raw > 180    then false
             else true
         end as is_geo_valid,
-
         case
-            when lat_raw is null or lon_raw is null            then null
-            when lat_raw < -90 or lat_raw > 90                 then null
-            when lon_raw < -180 or lon_raw > 180               then null
+            when lat_raw is null or lon_raw is null then null
+            when lat_raw < -90 or lat_raw > 90      then null
+            when lon_raw < -180 or lon_raw > 180    then null
             else lat_raw
         end as lat,
-
         case
-            when lat_raw is null or lon_raw is null            then null
-            when lat_raw < -90 or lat_raw > 90                 then null
-            when lon_raw < -180 or lon_raw > 180               then null
+            when lat_raw is null or lon_raw is null then null
+            when lat_raw < -90 or lat_raw > 90      then null
+            when lon_raw < -180 or lon_raw > 180    then null
             else lon_raw
         end as lon,
 
@@ -174,20 +124,21 @@ enriched as (
         registration_date,
         case
             when registration_date is null then null
-            else (
-                extract(year  from age(current_date, registration_date)) * 12
-              + extract(month from age(current_date, registration_date))
-            )::int
+            else cast(floor(months_between(current_date(), registration_date)) as int)
         end as tenure_months,
-        {{ tenure_bucket('registration_date') }} as tenure_bucket,
+        case
+            when registration_date is null then 'unknown'
+            when floor(months_between(current_date(), registration_date)) < 6  then 'new'
+            when floor(months_between(current_date(), registration_date)) <= 24 then 'established'
+            else 'loyal'
+        end as tenure_bucket,
 
-        {{ normalize_kyc_status('kyc_status') }} as kyc_status,
+        {{ normalize_casing('kyc_status') }}                 as kyc_status,
         risk_score,
         {{ normalize_customer_segment('customer_segment') }} as customer_segment,
         relationship_manager,
-        {{ normalize_customer_status('status_raw') }} as status,
+        {{ normalize_customer_status('status_raw') }}        as status,
 
-        -- ---------- Audit ----------
         load_timestamp
 
     from flat

@@ -78,10 +78,7 @@ enriched as (
         -- NULL when start_date is null.
         case
             when start_date is null then null
-            else (
-                extract(year  from age(current_date, start_date)) * 12
-              + extract(month from age(current_date, start_date))
-            )::int
+            else cast(floor(months_between(current_date(), start_date)) as int)
         end as loan_age_months,
 
         -- remaining_term_months: months between now and end_date.
@@ -89,10 +86,7 @@ enriched as (
         -- paid_off or default). NULL when end_date is null.
         case
             when end_date is null then null
-            else (
-                extract(year  from age(end_date, current_date)) * 12
-              + extract(month from age(end_date, current_date))
-            )::int
+            else cast(floor(months_between(end_date, current_date())) as int)
         end as remaining_term_months,
 
         -- principal_repaid: how much of the principal has been paid down.

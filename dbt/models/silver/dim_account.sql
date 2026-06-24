@@ -6,24 +6,9 @@
 }}
 
 /*
-    silver.dim_account
-    ------------------
-    Account dimension. One row per account.
-
-    Reads from stg_accounts (already normalized by Spark + dbt staging).
-    Adds derived attributes:
-      - account_age_months: months since opened_date.
-
-    Does NOT denormalize customer attributes (segment, country, etc.).
-    Those are joined in gold marts via customer_id. Keeping the
-    dimension narrow honors classical Kimball: dims are reused across
-    facts, and denormalization happens at the mart level where the
-    grain and use case are known.
-
-    Materialization: table. Joined by every downstream gold mart that
-    needs account-level grain.
-
-    Grain: 1 row per account_id.
+    silver.dim_account — versión Databricks.
+    Único cambio: age(current_date, opened_date) -> months_between(current_date(), opened_date).
+    El resto lee de stg_accounts (ya limpio) y porta sin tocar.
 */
 
 with source as (
@@ -47,11 +32,8 @@ with source as (
 enriched as (
 
     select
-        -- ---------- Identity ----------
         account_id,
         customer_id,
-
-        -- ---------- Account attributes ----------
         account_type,
         currency,
         balance,
@@ -61,18 +43,12 @@ enriched as (
         status,
         branch_code,
 
-        -- ---------- Derived attributes ----------
-        -- account_age_months: months elapsed since opened_date.
-        -- NULL when opened_date is NULL (unparseable in bronze).
+        -- account_age_months: meses desde opened_date. NULL si opened_date es NULL.
         case
             when opened_date is null then null
-            else (
-                extract(year  from age(current_date, opened_date)) * 12
-              + extract(month from age(current_date, opened_date))
-            )::int
+            else cast(floor(months_between(current_date(), opened_date)) as int)
         end as account_age_months,
 
-        -- ---------- Audit ----------
         load_timestamp
 
     from source
