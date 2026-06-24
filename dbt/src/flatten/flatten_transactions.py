@@ -71,7 +71,10 @@ def flatten_transactions(bronze_df: DataFrame) -> DataFrame:
         col("load_timestamp"),
     )
 
-    flat = flat.withColumn("amount", col("amount").cast(DoubleType()))
+    from pyspark.sql.functions import regexp_replace
+    flat = flat.withColumn( "amount",
+    regexp_replace(col("amount"), r"[^0-9.\-]", "").cast(DoubleType())
+    )
 
     string_cols = ["customer_id", "transaction_id", "account_id", "currency",
                    "transaction_type", "category", "merchant", "channel",
